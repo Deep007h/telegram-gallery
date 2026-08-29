@@ -39,6 +39,7 @@ fun CollectionsScreen(
     onCategoryClick: (String) -> Unit,
     onAlbumClick: (DeviceAlbum) -> Unit,
     onTrashClick: () -> Unit = {},
+    onSmartCleanerClick: () -> Unit = {},
     onRefresh: () -> Unit = {}
 ) {
     LaunchedEffect(Unit) {
@@ -98,7 +99,7 @@ fun CollectionsScreen(
             .fillMaxSize()
             .background(GoogleDarkBackground)
     ) {
-        // Quick Action Chips Section (2x2 matching screenshot)
+        // Quick Action Chips Section (2x2)
         item(span = { GridItemSpan(2) }) {
             Column {
                 Row(
@@ -143,6 +144,59 @@ fun CollectionsScreen(
                         title = "Archive",
                         onClick = { onCategoryClick("Archive") },
                         modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+
+        // Smart Cleaner Promo Card
+        item(span = { GridItemSpan(2) }) {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1B1B24)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onSmartCleanerClick)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = Color(0xFF388E3C).copy(alpha = 0.2f),
+                        modifier = Modifier.size(42.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.CleaningServices,
+                                contentDescription = "Smart Cleaner",
+                                tint = Color(0xFF81C784),
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Smart Storage Cleaner",
+                            color = Color.White,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "Clean duplicate photos, large videos & old media",
+                            color = Color.White.copy(alpha = 0.6f),
+                            fontSize = 12.sp
+                        )
+                    }
+                    Icon(
+                        imageVector = Icons.Default.ChevronRight,
+                        contentDescription = null,
+                        tint = Color.White.copy(alpha = 0.4f),
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }

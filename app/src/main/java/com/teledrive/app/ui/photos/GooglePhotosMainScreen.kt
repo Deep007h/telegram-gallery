@@ -17,10 +17,13 @@ import androidx.navigation.NavController
 import com.teledrive.app.TeleDriveApplication
 import com.teledrive.app.data.db.entity.FileEntity
 import com.teledrive.app.data.repository.DeviceAlbum
+import com.teledrive.app.data.cleaner.SmartCleanupEngine
+import com.teledrive.app.data.repository.DeviceMediaRepository
 import com.teledrive.app.data.repository.LocalMediaItem
 import com.teledrive.app.data.repository.PersonCluster
 import com.teledrive.app.data.repository.UnifiedMediaItem
 import com.teledrive.app.ui.albums.AlbumDetailScreen
+import com.teledrive.app.ui.cleaner.SmartCleanerScreen
 import com.teledrive.app.ui.collections.CollectionsScreen
 import com.teledrive.app.ui.collections.DeviceAlbumsGridScreen
 import com.teledrive.app.ui.components.GooglePhotosBottomNav
@@ -61,6 +64,7 @@ fun GooglePhotosMainScreen(
     var showProfileSheet by remember { mutableStateOf(false) }
     var showSearchSheet by remember { mutableStateOf(false) }
     var showTrashScreen by remember { mutableStateOf(false) }
+    var showSmartCleaner by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
     val app = TeleDriveApplication.instance
@@ -199,6 +203,7 @@ fun GooglePhotosMainScreen(
         enabled = selectedCategoryName != null ||
                   showDeviceAlbumsGrid ||
                   selectedDeviceAlbum != null ||
+                  showSmartCleaner ||
                   showTrashScreen ||
                   showSearchSheet ||
                   showProfileSheet ||
@@ -212,6 +217,7 @@ fun GooglePhotosMainScreen(
             selectedDeviceAlbum != null -> selectedDeviceAlbum = null
             showDeviceAlbumsGrid -> showDeviceAlbumsGrid = false
             selectedCategoryName != null -> selectedCategoryName = null
+            showSmartCleaner -> showSmartCleaner = false
             showTrashScreen -> showTrashScreen = false
             showSearchSheet -> showSearchSheet = false
             showProfileSheet -> showProfileSheet = false
@@ -262,6 +268,26 @@ fun GooglePhotosMainScreen(
                 onDelete = { fileToDelete ->
                     viewModel.deleteFile(fileToDelete)
                     activeViewerItem = null
+                }
+            )
+        } else if (showSmartCleaner) {
+            val cleanupEngine = remember { SmartCleanupEngine(context, DeviceMediaRepository(context)) }
+            SmartCleanerScreen(
+                cleanupEngine = cleanupEngine,
+                onBack = { showSmartCleaner = false },
+                onUploadAndClean = { items ->
+                    viewModel.uploadLocalMediaItems(items)
+                    scope.launch {
+                        cleanupEngine.deleteLocalMediaItems(items)
+                        viewModel.loadDeviceAlbums()
+                    }
+                    navController.navigate(Screen.Transfers.route)
+                },
+                onDeleteDirectly = { items ->
+                    scope.launch {
+                        cleanupEngine.deleteLocalMediaItems(items)
+                        viewModel.loadDeviceAlbums()
+                    }
                 }
             )
         } else if (showTrashScreen) {
@@ -359,6 +385,7 @@ fun GooglePhotosMainScreen(
                                         onAlbumClick = { album -> selectedDeviceAlbum = album },
                                         onCategoryClick = { category -> selectedCategoryName = category },
                                         onTrashClick = { showTrashScreen = true },
+                                        onSmartCleanerClick = { showSmartCleaner = true },
                                         onRefresh = {
                                             viewModel.loadDeviceAlbums()
                                             viewModel.syncCurrentSource()
