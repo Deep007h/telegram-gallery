@@ -32,6 +32,7 @@ import com.teledrive.app.data.repository.DeviceAlbum
 import com.teledrive.app.data.repository.LocalMediaItem
 import com.teledrive.app.data.repository.PersonCluster
 import com.teledrive.app.data.repository.UnifiedMediaItem
+import com.teledrive.app.data.repository.toUnifiedMediaItem
 import com.teledrive.app.ui.albums.AlbumDetailScreen
 import com.teledrive.app.ui.cleaner.SmartCleanerScreen
 import com.teledrive.app.ui.collections.CollectionsScreen
@@ -429,9 +430,14 @@ fun GooglePhotosMainScreen(
 
     GooglePhotosTheme {
         if (activeUnifiedItem != null) {
+            val viewerAllItems = when {
+                selectedDeviceAlbum != null -> selectedDeviceAlbum!!.items.map { it.toUnifiedMediaItem() }
+                selectedCategoryName != null -> categoryFilteredUnifiedMedia
+                else -> photosVisibleMedia
+            }
             UnifiedMediaViewerScreen(
                 initialItem = activeUnifiedItem!!,
-                allItems = if (selectedCategoryName != null) categoryFilteredUnifiedMedia else photosVisibleMedia,
+                allItems = viewerAllItems,
                 onBack = { activeUnifiedItem = null },
                 onUpload = { item ->
                     item.localUri?.let { uri ->
@@ -520,23 +526,12 @@ fun GooglePhotosMainScreen(
                     Toast.makeText(context, "Backing up ${items.size} item(s)...", Toast.LENGTH_SHORT).show()
                 },
                 onMoveToTrash = { localItems ->
-                    val unifiedItems = localItems.map { local ->
-                        UnifiedMediaItem(
-                            id = "local_${local.id}",
-                            displayName = local.displayName,
-                            dateModified = local.dateModified,
-                            isVideo = local.isVideo,
-                            durationMs = local.durationMs,
-                            mimeType = local.mimeType,
-                            fileSize = local.size,
-                            localUri = local.contentUri,
-                            localPath = local.filePath,
-                            isLocalOnDevice = true,
-                            bucketName = local.bucketName
-                        )
-                    }
+                    val unifiedItems = localItems.map { it.toUnifiedMediaItem() }
                     viewModel.moveToTrash(unifiedItems)
                     Toast.makeText(context, "Moved ${localItems.size} item(s) to Trash", Toast.LENGTH_SHORT).show()
+                },
+                onItemClick = { clickedItem ->
+                    activeUnifiedItem = clickedItem.toUnifiedMediaItem()
                 }
             )
         } else if (showDeviceAlbumsGrid) {
@@ -574,23 +569,12 @@ fun GooglePhotosMainScreen(
                             Toast.makeText(context, "Backing up ${items.size} item(s)...", Toast.LENGTH_SHORT).show()
                         },
                         onMoveToTrash = { localItems ->
-                            val unifiedItems = localItems.map { local ->
-                                UnifiedMediaItem(
-                                    id = "local_${local.id}",
-                                    displayName = local.displayName,
-                                    dateModified = local.dateModified,
-                                    isVideo = local.isVideo,
-                                    durationMs = local.durationMs,
-                                    mimeType = local.mimeType,
-                                    fileSize = local.size,
-                                    localUri = local.contentUri,
-                                    localPath = local.filePath,
-                                    isLocalOnDevice = true,
-                                    bucketName = local.bucketName
-                                )
-                            }
+                            val unifiedItems = localItems.map { it.toUnifiedMediaItem() }
                             viewModel.moveToTrash(unifiedItems)
                             Toast.makeText(context, "Moved ${localItems.size} item(s) to Trash", Toast.LENGTH_SHORT).show()
+                        },
+                        onItemClick = { clickedItem ->
+                            activeUnifiedItem = clickedItem.toUnifiedMediaItem()
                         }
                     )
                 } else {

@@ -243,11 +243,59 @@ class UploadWorker(
                 val srcLocalFile = File(transferEntity.localFilePath)
                 if (srcLocalFile.exists() && srcLocalFile.length() > 0) {
                     val cachedThumb = com.teledrive.app.core.FastThumbnailCacheManager.getThumbnailFile(context, finalMessageId.toString())
-                    srcLocalFile.copyTo(cachedThumb, overwrite = true)
-                    com.teledrive.app.core.FastThumbnailCacheManager.putWarmCache(finalMessageId.toString(), cachedThumb.absolutePath)
-                    val inserted = fileDao.getByMessageId(targetChatId, finalMessageId)
-                    if (inserted != null) {
-                        com.teledrive.app.core.FastThumbnailCacheManager.putWarmCache("cloud_${inserted.fileId}", cachedThumb.absolutePath)
+                    val isVideo = mimeType.startsWith("video/") || transferEntity.fileName.endsWith(".mp4", true) || transferEntity.fileName.endsWith(".mkv", true)
+                    var thumbCreated = false
+
+                    if (isVideo) {
+                        val retriever = android.media.MediaMetadataRetriever()
+                        try {
+                            retriever.setDataSource(srcLocalFile.absolutePath)
+                            val frame = retriever.frameAtTime
+                            if (frame != null) {
+                                java.io.FileOutputStream(cachedThumb).use { out ->
+                                    val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                        android.graphics.Bitmap.CompressFormat.WEBP_LOSSY
+                                    } else {
+                                        @Suppress("DEPRECATION")
+                                        android.graphics.Bitmap.CompressFormat.WEBP
+                                    }
+                                    frame.compress(format, 80, out)
+                                }
+                                frame.recycle()
+                                thumbCreated = true
+                            }
+                        } catch (_: Exception) {
+                        } finally {
+                            try { retriever.release() } catch (_: Exception) {}
+                        }
+                    } else if (mimeType.startsWith("image/")) {
+                        if (srcLocalFile.length() < 300_000L) {
+                            srcLocalFile.copyTo(cachedThumb, overwrite = true)
+                            thumbCreated = true
+                        } else {
+                            val bmp = com.teledrive.app.core.FastThumbnailCacheManager.decodeSampledBitmap(srcLocalFile.absolutePath, 384)
+                            if (bmp != null) {
+                                java.io.FileOutputStream(cachedThumb).use { out ->
+                                    val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                        android.graphics.Bitmap.CompressFormat.WEBP_LOSSY
+                                    } else {
+                                        @Suppress("DEPRECATION")
+                                        android.graphics.Bitmap.CompressFormat.WEBP
+                                    }
+                                    bmp.compress(format, 82, out)
+                                }
+                                bmp.recycle()
+                                thumbCreated = true
+                            }
+                        }
+                    }
+
+                    if (thumbCreated && cachedThumb.exists() && cachedThumb.length() > 0) {
+                        com.teledrive.app.core.FastThumbnailCacheManager.putWarmCache(finalMessageId.toString(), cachedThumb.absolutePath)
+                        val inserted = fileDao.getByMessageId(targetChatId, finalMessageId)
+                        if (inserted != null) {
+                            com.teledrive.app.core.FastThumbnailCacheManager.putWarmCache("cloud_${inserted.fileId}", cachedThumb.absolutePath)
+                        }
                     }
                 }
             } catch (_: Exception) {}
@@ -273,7 +321,6 @@ class UploadWorker(
             try {
                 val f = File(transferEntity.localFilePath)
                 val tempDir = context.cacheDir.absolutePath
-                val filesDir = context.filesDir.absolutePath
                 if (f.absolutePath.startsWith(tempDir) || f.absolutePath.contains("/teledrive_temp/") || f.name.startsWith("temp_upload_")) {
                     f.delete()
                 }

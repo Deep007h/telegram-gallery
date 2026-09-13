@@ -44,6 +44,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
@@ -89,6 +91,11 @@ fun UnifiedMediaViewerScreen(
     var showControls by remember { mutableStateOf(true) }
     var showDetailsSheet by remember { mutableStateOf(false) }
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+    var isCurrentItemZoomed by remember { mutableStateOf(false) }
+
+    LaunchedEffect(pagerState.currentPage) {
+        isCurrentItemZoomed = false
+    }
 
     // Swipe down to dismiss
     val offsetY = remember { Animatable(0f) }
@@ -110,6 +117,7 @@ fun UnifiedMediaViewerScreen(
         HorizontalPager(
             state = pagerState,
             key = { idx -> effectiveList.getOrNull(idx)?.id ?: idx.toString() },
+            userScrollEnabled = !isCurrentItemZoomed,
             modifier = Modifier.fillMaxSize()
         ) { page ->
             val item = effectiveList.getOrNull(page) ?: return@HorizontalPager
@@ -118,25 +126,27 @@ fun UnifiedMediaViewerScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(Unit) {
-                        detectVerticalDragGestures(
-                            onVerticalDrag = { change, dragAmount ->
-                                change.consume()
-                                if (dragAmount > 0 || offsetY.value > 0) {
-                                    scope.launch { offsetY.snapTo(offsetY.value + dragAmount) }
-                                }
-                            },
-                            onDragEnd = {
-                                if (offsetY.value > 200f) {
-                                    onBack()
-                                } else {
+                    .pointerInput(isCurrentItemZoomed) {
+                        if (!isCurrentItemZoomed) {
+                            detectVerticalDragGestures(
+                                onVerticalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    if (dragAmount > 0 || offsetY.value > 0) {
+                                        scope.launch { offsetY.snapTo(offsetY.value + dragAmount) }
+                                    }
+                                },
+                                onDragEnd = {
+                                    if (offsetY.value > 200f) {
+                                        onBack()
+                                    } else {
+                                        scope.launch { offsetY.animateTo(0f, tween(150)) }
+                                    }
+                                },
+                                onDragCancel = {
                                     scope.launch { offsetY.animateTo(0f, tween(150)) }
                                 }
-                            },
-                            onDragCancel = {
-                                scope.launch { offsetY.animateTo(0f, tween(150)) }
-                            }
-                        )
+                            )
+                        }
                     },
                 contentAlignment = Alignment.Center
             ) {
@@ -164,17 +174,20 @@ fun UnifiedMediaViewerScreen(
                     if (item.localUri != null) {
                         SingleLocalImageViewerPage(
                             uri = item.localUri,
-                            onTap = { showControls = !showControls }
+                            onTap = { showControls = !showControls },
+                            onZoomChanged = { if (isCurrentPage) isCurrentItemZoomed = it }
                         )
                     } else if (item.localPath != null && File(item.localPath).exists()) {
                         SingleLocalImageViewerPage(
                             uri = Uri.fromFile(File(item.localPath)),
-                            onTap = { showControls = !showControls }
+                            onTap = { showControls = !showControls },
+                            onZoomChanged = { if (isCurrentPage) isCurrentItemZoomed = it }
                         )
                     } else if (item.cloudFile != null) {
                         SingleImageViewerPage(
                             file = item.cloudFile,
-                            onTap = { showControls = !showControls }
+                            onTap = { showControls = !showControls },
+                            onZoomChanged = { if (isCurrentPage) isCurrentItemZoomed = it }
                         )
                     }
                 }
@@ -377,6 +390,11 @@ fun MediaViewerScreen(
     val currentItem = effectiveList.getOrNull(pagerState.currentPage.coerceIn(0, effectiveList.size - 1)) ?: initialItem
     var showControls by remember { mutableStateOf(true) }
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+    var isCurrentItemZoomed by remember { mutableStateOf(false) }
+
+    LaunchedEffect(pagerState.currentPage) {
+        isCurrentItemZoomed = false
+    }
 
     // Swipe down to dismiss
     val offsetY = remember { Animatable(0f) }
@@ -398,6 +416,7 @@ fun MediaViewerScreen(
         HorizontalPager(
             state = pagerState,
             key = { idx -> effectiveList.getOrNull(idx)?.fileId ?: idx },
+            userScrollEnabled = !isCurrentItemZoomed,
             modifier = Modifier.fillMaxSize()
         ) { page ->
             val item = effectiveList.getOrNull(page) ?: return@HorizontalPager
@@ -408,25 +427,27 @@ fun MediaViewerScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .pointerInput(Unit) {
-                        detectVerticalDragGestures(
-                            onVerticalDrag = { change, dragAmount ->
-                                change.consume()
-                                if (dragAmount > 0 || offsetY.value > 0) {
-                                    scope.launch { offsetY.snapTo(offsetY.value + dragAmount) }
-                                }
-                            },
-                            onDragEnd = {
-                                if (offsetY.value > 200f) {
-                                    onBack()
-                                } else {
+                    .pointerInput(isCurrentItemZoomed) {
+                        if (!isCurrentItemZoomed) {
+                            detectVerticalDragGestures(
+                                onVerticalDrag = { change, dragAmount ->
+                                    change.consume()
+                                    if (dragAmount > 0 || offsetY.value > 0) {
+                                        scope.launch { offsetY.snapTo(offsetY.value + dragAmount) }
+                                    }
+                                },
+                                onDragEnd = {
+                                    if (offsetY.value > 200f) {
+                                        onBack()
+                                    } else {
+                                        scope.launch { offsetY.animateTo(0f, tween(150)) }
+                                    }
+                                },
+                                onDragCancel = {
                                     scope.launch { offsetY.animateTo(0f, tween(150)) }
                                 }
-                            },
-                            onDragCancel = {
-                                scope.launch { offsetY.animateTo(0f, tween(150)) }
-                            }
-                        )
+                            )
+                        }
                     },
                 contentAlignment = Alignment.Center
             ) {
@@ -439,7 +460,8 @@ fun MediaViewerScreen(
                 } else {
                     SingleImageViewerPage(
                         file = item,
-                        onTap = { showControls = !showControls }
+                        onTap = { showControls = !showControls },
+                        onZoomChanged = { if (isCurrentPage) isCurrentItemZoomed = it }
                     )
                 }
             }
@@ -584,7 +606,8 @@ fun MediaViewerScreen(
 @Composable
 fun SingleImageViewerPage(
     file: FileEntity,
-    onTap: () -> Unit
+    onTap: () -> Unit,
+    onZoomChanged: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     val app = TeleDriveApplication.instance
@@ -597,6 +620,10 @@ fun SingleImageViewerPage(
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(scale) {
+        onZoomChanged(scale > 1.05f)
+    }
 
     val cachedThumb = remember(file.fileId) {
         app.thumbnailCacheManager.getFastCachedPath(file)
@@ -631,6 +658,8 @@ fun SingleImageViewerPage(
                     localPath = tdFile.local.path
                     isLoading = false
                     return@LaunchedEffect
+                } else if (!tdFile.local.canBeDownloaded) {
+                    currentFileId = 0
                 }
             } catch (e: Exception) {
                 // File ID invalid or from previous session: reset to 0 to rehydrate
@@ -689,14 +718,14 @@ fun SingleImageViewerPage(
         }
     }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(Unit) {
                 detectTransformGestures { _, pan, zoom, _ ->
                     val newScale = (scale * zoom).coerceIn(1f, 5f)
                     scale = newScale
-                    if (newScale > 1f) {
+                    if (newScale > 1.01f) {
                         offsetX += pan.x
                         offsetY += pan.y
                     } else {
@@ -727,6 +756,11 @@ fun SingleImageViewerPage(
             },
         contentAlignment = Alignment.Center
     ) {
+        val maxOffsetX = (constraints.maxWidth.toFloat() * (scale - 1f) / 2f).coerceAtLeast(0f)
+        val maxOffsetY = (constraints.maxHeight.toFloat() * (scale - 1f) / 2f).coerceAtLeast(0f)
+        val clampedX = offsetX.coerceIn(-maxOffsetX, maxOffsetX)
+        val clampedY = offsetY.coerceIn(-maxOffsetY, maxOffsetY)
+
         if (localPath != null) {
             AsyncImage(
                 model = File(localPath!!),
@@ -736,8 +770,8 @@ fun SingleImageViewerPage(
                     .graphicsLayer(
                         scaleX = scale,
                         scaleY = scale,
-                        translationX = offsetX,
-                        translationY = offsetY
+                        translationX = clampedX,
+                        translationY = clampedY
                     ),
                 contentScale = ContentScale.Fit
             )
@@ -796,6 +830,12 @@ fun SingleVideoPlayerPage(
 
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
+            repeatMode = ExoPlayer.REPEAT_MODE_ONE
+            val audioAttributes = AudioAttributes.Builder()
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .setUsage(C.USAGE_MEDIA)
+                .build()
+            setAudioAttributes(audioAttributes, true)
             playWhenReady = true
         }
     }
@@ -829,6 +869,8 @@ fun SingleVideoPlayerPage(
                     localPath = tdFile.local.path
                     isLoading = false
                     return@LaunchedEffect
+                } else if (!tdFile.local.canBeDownloaded) {
+                    currentFileId = 0
                 }
             } catch (e: Exception) {
                 currentFileId = 0
@@ -969,21 +1011,26 @@ fun SingleVideoPlayerPage(
 @Composable
 fun SingleLocalImageViewerPage(
     uri: Uri,
-    onTap: () -> Unit
+    onTap: () -> Unit,
+    onZoomChanged: (Boolean) -> Unit = {}
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
 
-    Box(
+    LaunchedEffect(scale) {
+        onZoomChanged(scale > 1.05f)
+    }
+
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .pointerInput(Unit) {
                 detectTransformGestures { _, pan, zoom, _ ->
                     val newScale = (scale * zoom).coerceIn(1f, 5f)
                     scale = newScale
-                    if (newScale > 1f) {
+                    if (newScale > 1.01f) {
                         offsetX += pan.x
                         offsetY += pan.y
                     } else {
@@ -1014,6 +1061,11 @@ fun SingleLocalImageViewerPage(
             },
         contentAlignment = Alignment.Center
     ) {
+        val maxOffsetX = (constraints.maxWidth.toFloat() * (scale - 1f) / 2f).coerceAtLeast(0f)
+        val maxOffsetY = (constraints.maxHeight.toFloat() * (scale - 1f) / 2f).coerceAtLeast(0f)
+        val clampedX = offsetX.coerceIn(-maxOffsetX, maxOffsetX)
+        val clampedY = offsetY.coerceIn(-maxOffsetY, maxOffsetY)
+
         AsyncImage(
             model = uri,
             contentDescription = null,
@@ -1023,8 +1075,8 @@ fun SingleLocalImageViewerPage(
                 .graphicsLayer {
                     scaleX = scale
                     scaleY = scale
-                    translationX = offsetX
-                    translationY = offsetY
+                    translationX = clampedX
+                    translationY = clampedY
                 }
         )
     }
@@ -1040,6 +1092,11 @@ fun SingleLocalVideoPlayerPage(
     val exoPlayer = remember {
         ExoPlayer.Builder(context).build().apply {
             repeatMode = ExoPlayer.REPEAT_MODE_ONE
+            val audioAttributes = AudioAttributes.Builder()
+                .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                .setUsage(C.USAGE_MEDIA)
+                .build()
+            setAudioAttributes(audioAttributes, true)
         }
     }
 

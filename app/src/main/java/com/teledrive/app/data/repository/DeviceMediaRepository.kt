@@ -57,6 +57,22 @@ data class UnifiedMediaItem(
     val bucketName: String? = null
 )
 
+fun LocalMediaItem.toUnifiedMediaItem(): UnifiedMediaItem = UnifiedMediaItem(
+    id = "local_${id}",
+    displayName = displayName,
+    dateModified = dateModified,
+    isVideo = isVideo,
+    durationMs = durationMs,
+    mimeType = mimeType,
+    fileSize = size,
+    localUri = contentUri,
+    localPath = filePath,
+    cloudFile = null,
+    isCloudBackedUp = false,
+    isLocalOnDevice = true,
+    bucketName = bucketName
+)
+
 class DeviceMediaRepository(private val context: Context) {
 
     private val mutex = Mutex()
@@ -299,6 +315,9 @@ class DeviceMediaRepository(private val context: Context) {
         }
 
         for (local in localMedia) {
+            if (trashedIds.contains("local_${local.id}")) {
+                continue
+            }
             val key = local.displayName.lowercase().trim()
             val candidateClouds = cloudByName[key]
             // Exact size match only: the old <4096 tolerance merged distinct

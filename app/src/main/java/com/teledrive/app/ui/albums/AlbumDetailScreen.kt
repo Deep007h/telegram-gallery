@@ -50,7 +50,6 @@ fun AlbumDetailScreen(
     var isSelectionMode by remember { mutableStateOf(false) }
     val selectedItemIds = remember { mutableStateListOf<Long>() }
     var showTrashConfirmDialog by remember { mutableStateOf(false) }
-    var activeFullscreenItem by remember { mutableStateOf<LocalMediaItem?>(null) }
 
     Scaffold(
         topBar = {
@@ -256,7 +255,6 @@ fun AlbumDetailScreen(
                                 selectedItemIds.add(item.id)
                             }
                         } else {
-                            activeFullscreenItem = item
                             onItemClick(item)
                         }
                     },

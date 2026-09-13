@@ -96,6 +96,8 @@ class DownloadWorker(
                     val tdFile = tdLibManager.getFile(tdFileId)
                     if (tdFile.local.isDownloadingCompleted && tdFile.local.path.isNotEmpty() && File(tdFile.local.path).exists()) {
                         completedLocalPath = tdFile.local.path
+                    } else if (!tdFile.local.canBeDownloaded) {
+                        tdFileId = 0
                     }
                 } catch (e: Exception) {
                     // Stale file ID from previous session: invalidate to rehydrate fresh ID
@@ -252,7 +254,9 @@ class DownloadWorker(
             if (!finalLocalPath.isNullOrEmpty()) {
                 val sourceFile = File(finalLocalPath)
                 if (sourceFile.exists() && sourceFile.length() > 0L) {
-                    sourceFile.copyTo(destFile, overwrite = true)
+                    if (sourceFile.canonicalPath != destFile.canonicalPath) {
+                        sourceFile.copyTo(destFile, overwrite = true)
+                    }
                     MediaScannerConnection.scanFile(context, arrayOf(destFile.absolutePath), null, null)
                     transferDao.updateProgress(transferId, destFile.length(), System.currentTimeMillis())
                     transferDao.updateStatus(transferId, "COMPLETED", null, System.currentTimeMillis())

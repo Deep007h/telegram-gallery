@@ -489,7 +489,7 @@ class ExplorerViewModel : ViewModel() {
 
             _uiState.update {
                 it.copy(
-                    storageSource = StorageSource.SAVED_MESSAGES,
+                    storageSource = source,
                     activeChatId = targetChatId,
                     isLoading = true
                 )
@@ -853,6 +853,16 @@ class ExplorerViewModel : ViewModel() {
             try {
                 TeleDriveApplication.instance.tdLibManager.logout()
             } catch (e: Exception) {}
+            try {
+                val db = TeleDriveApplication.instance.database
+                db.fileDao().clearAll()
+                db.folderDao().clearAll()
+                db.transferDao().clearAll()
+                TeleDriveApplication.instance.thumbnailCacheManager.clearAll()
+            } catch (_: Exception) {}
+            try {
+                preferences.clear()
+            } catch (_: Exception) {}
             onLoggedOut()
         }
     }

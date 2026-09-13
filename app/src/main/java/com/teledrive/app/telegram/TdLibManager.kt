@@ -7,6 +7,7 @@ import com.teledrive.app.core.Constants
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -46,16 +47,16 @@ class TdLibManager {
     private val _connectionState = MutableStateFlow<TdLibConnectionState>(TdLibConnectionState.WaitingForNetwork)
     val connectionState: StateFlow<TdLibConnectionState> = _connectionState.asStateFlow()
 
-    private val _fileUpdates = MutableSharedFlow<TdFileUpdate>(extraBufferCapacity = 512)
+    private val _fileUpdates = MutableSharedFlow<TdFileUpdate>(extraBufferCapacity = 512, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val fileUpdates: SharedFlow<TdFileUpdate> = _fileUpdates.asSharedFlow()
 
-    private val _newMessages = MutableSharedFlow<TdMessageInfo>(extraBufferCapacity = 256)
+    private val _newMessages = MutableSharedFlow<TdMessageInfo>(extraBufferCapacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val newMessages: SharedFlow<TdMessageInfo> = _newMessages.asSharedFlow()
 
-    private val _deletedMessages = MutableSharedFlow<Pair<Long, LongArray>>(extraBufferCapacity = 100)
+    private val _deletedMessages = MutableSharedFlow<Pair<Long, LongArray>>(extraBufferCapacity = 100, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val deletedMessages: SharedFlow<Pair<Long, LongArray>> = _deletedMessages.asSharedFlow()
 
-    private val _recaptchaRequests = MutableSharedFlow<RecaptchaRequest>(extraBufferCapacity = 10)
+    private val _recaptchaRequests = MutableSharedFlow<RecaptchaRequest>(extraBufferCapacity = 10, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val recaptchaRequests: SharedFlow<RecaptchaRequest> = _recaptchaRequests.asSharedFlow()
 
     private val _myUser = MutableStateFlow<TdApi.User?>(null)
@@ -1375,6 +1376,9 @@ class TdLibManager {
                 if (tdFile.local.isDownloadingCompleted && tdFile.local.path.isNotEmpty() && File(tdFile.local.path).exists()) {
                     onProgress?.invoke(tdFile.size, tdFile.size)
                     return tdFile.local.path
+                }
+                if (!tdFile.local.canBeDownloaded) {
+                    activeFileId = 0
                 }
             } catch (e: Exception) {
                 // preferredFileId is invalid or from a previous session! Reset to 0 immediately!

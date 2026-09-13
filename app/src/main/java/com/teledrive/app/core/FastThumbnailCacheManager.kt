@@ -85,6 +85,17 @@ object FastThumbnailCacheManager {
         return File(dir, "thumb_${safeKey(itemId)}.webp")
     }
 
+    fun removeCachedThumbnail(itemId: String) {
+        val key = safeKey(itemId)
+        warmCache.remove(key)
+        try {
+            val file = getThumbnailFile(com.teledrive.app.TeleDriveApplication.instance, itemId)
+            if (file.exists()) {
+                file.delete()
+            }
+        } catch (_: Exception) {}
+    }
+
     suspend fun generateAndSaveThumbnail(context: Context, item: UnifiedMediaItem): String? = withContext(Dispatchers.IO) {
         val key = safeKey(item.id)
         warmCache[key]?.let { return@withContext it }
@@ -196,7 +207,7 @@ object FastThumbnailCacheManager {
         return@withContext null
     }
 
-    private fun decodeSampledBitmap(path: String, reqSize: Int): Bitmap? {
+    internal fun decodeSampledBitmap(path: String, reqSize: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(path, bounds)
         val w = bounds.outWidth
