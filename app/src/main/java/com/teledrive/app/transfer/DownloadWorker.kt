@@ -88,24 +88,9 @@ class DownloadWorker(
                 tdFileId = fileEntity.telegramFileId
             }
 
-            // Rehydrate fresh TDLib file ID if missing, 0, or invalid
-            if (tdFileId == 0 && chatId != 0L && msgId != 0L) {
-                try {
-                    val freshInfo = tdLibManager.getMessageInfo(chatId, msgId)
-                    if (freshInfo != null && freshInfo.documentFileId != 0) {
-                        tdFileId = freshInfo.documentFileId
-                        if (fileEntity != null) {
-                            fileDao.updateFileIds(fileEntity.fileId, freshInfo.documentFileId, freshInfo.thumbnailFileId)
-                        }
-                    }
-                } catch (e: Exception) {
-                    AppLogger.w(TAG, "Rehydrate file ID failed for msgId=$msgId: ${e.message}")
-                }
-            }
-
             var completedLocalPath: String? = null
 
-            // Layer 1: Check TDLib cache directly
+            // Layer 1: Check TDLib cache directly or invalidate stale file ID
             if (tdFileId != 0) {
                 try {
                     val tdFile = tdLibManager.getFile(tdFileId)
@@ -113,19 +98,29 @@ class DownloadWorker(
                         completedLocalPath = tdFile.local.path
                     }
                 } catch (e: Exception) {
-                    // Stale file ID across sessions: attempt one more live rehydrate
-                    if (chatId != 0L && msgId != 0L) {
+                    // Stale file ID from previous session: invalidate to rehydrate fresh ID
+                    tdFileId = 0
+                }
+            }
+
+            // Rehydrate fresh TDLib file ID if missing, 0, or was stale
+            if (completedLocalPath == null && tdFileId == 0 && chatId != 0L && msgId != 0L) {
+                try {
+                    val freshInfo = tdLibManager.getMessageInfo(chatId, msgId)
+                    if (freshInfo != null && freshInfo.documentFileId != 0) {
+                        tdFileId = freshInfo.documentFileId
+                        if (fileEntity != null) {
+                            fileDao.updateFileIds(fileEntity.fileId, freshInfo.documentFileId, freshInfo.thumbnailFileId)
+                        }
                         try {
-                            val fresh = tdLibManager.getMessageInfo(chatId, msgId)
-                            if (fresh != null && fresh.documentFileId != 0 && fresh.documentFileId != tdFileId) {
-                                tdFileId = fresh.documentFileId
-                                val rechecked = tdLibManager.getFile(tdFileId)
-                                if (rechecked.local.isDownloadingCompleted && rechecked.local.path.isNotEmpty() && File(rechecked.local.path).exists()) {
-                                    completedLocalPath = rechecked.local.path
-                                }
+                            val rechecked = tdLibManager.getFile(tdFileId)
+                            if (rechecked.local.isDownloadingCompleted && rechecked.local.path.isNotEmpty() && File(rechecked.local.path).exists()) {
+                                completedLocalPath = rechecked.local.path
                             }
                         } catch (_: Exception) {}
                     }
+                } catch (e: Exception) {
+                    AppLogger.w(TAG, "Rehydrate file ID failed for msgId=$msgId: ${e.message}")
                 }
             }
 

@@ -2,6 +2,7 @@ package com.teledrive.app.telegram
 
 import android.content.Context
 import android.os.Build
+import com.teledrive.app.TeleDriveApplication
 import com.teledrive.app.core.Constants
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -1059,7 +1060,7 @@ class TdLibManager {
     suspend fun downloadFile(
         fileId: Int,
         priority: Int = 1,
-        timeoutMs: Long = 180_000L,
+        timeoutMs: Long = 45_000L,
         onProgress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)? = null
     ): String {
         try {
@@ -1100,7 +1101,9 @@ class TdLibManager {
                         return@withTimeout res.local.path
                     }
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    progressJob?.cancel()
+                    completionDeferred.cancel()
+                    return@withTimeout ""
                 }
 
                 // Wait for the flow to deliver the completion event
@@ -1117,7 +1120,9 @@ class TdLibManager {
         } catch (e: Exception) {
             try {
                 val file = getFile(fileId)
-                if (file.local.isDownloadingCompleted) file.local.path else ""
+                if (file.local.isDownloadingCompleted && file.local.path.isNotEmpty() && File(file.local.path).exists()) {
+                    file.local.path
+                } else ""
             } catch (ex: Exception) {
                 ""
             }
@@ -1361,34 +1366,51 @@ class TdLibManager {
         priority: Int = 32,
         onProgress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)? = null
     ): String {
-        if (preferredFileId != 0) {
+        var activeFileId = preferredFileId
+
+        // 1. Verify if preferredFileId is valid in the current TDLib session
+        if (activeFileId != 0) {
             try {
-                val tdFile = getFile(preferredFileId)
+                val tdFile = getFile(activeFileId)
                 if (tdFile.local.isDownloadingCompleted && tdFile.local.path.isNotEmpty() && File(tdFile.local.path).exists()) {
                     onProgress?.invoke(tdFile.size, tdFile.size)
                     return tdFile.local.path
                 }
-            } catch (ignored: Exception) {}
+            } catch (e: Exception) {
+                // preferredFileId is invalid or from a previous session! Reset to 0 immediately!
+                activeFileId = 0
+            }
+        }
+
+        // 2. If stale or 0, rehydrate fresh file ID from Telegram message
+        if (activeFileId == 0 && chatId != 0L && messageId != 0L) {
+            try {
+                val info = getMessageInfo(chatId, messageId)
+                if (info != null && info.documentFileId != 0) {
+                    activeFileId = info.documentFileId
+                    try {
+                        val app = TeleDriveApplication.instance
+                        val fileEntity = app.database.fileDao().getByMessageId(chatId, messageId)
+                        if (fileEntity != null) {
+                            app.database.fileDao().updateFileIds(fileEntity.fileId, info.documentFileId, info.thumbnailFileId)
+                        }
+                    } catch (_: Exception) {}
+                }
+            } catch (_: Exception) {}
+        }
+
+        // 3. Initiate and wait for download with verified activeFileId
+        if (activeFileId != 0) {
+            try {
+                startDownload(activeFileId, priority)
+            } catch (_: Exception) {}
 
             try {
-                val path = downloadFile(preferredFileId, priority, onProgress = onProgress)
+                val path = downloadFile(activeFileId, priority, timeoutMs = 45_000L, onProgress = onProgress)
                 if (path.isNotEmpty() && File(path).exists()) {
                     return path
                 }
-            } catch (ignored: Exception) {}
-        }
-
-        // Rehydrate using GetMessage if preferredFileId was stale or 0
-        if (chatId != 0L && messageId != 0L) {
-            val info = getMessageInfo(chatId, messageId)
-            if (info != null && info.documentFileId != 0) {
-                try {
-                    val freshPath = downloadFile(info.documentFileId, priority, onProgress = onProgress)
-                    if (freshPath.isNotEmpty() && File(freshPath).exists()) {
-                        return freshPath
-                    }
-                } catch (ignored: Exception) {}
-            }
+            } catch (_: Exception) {}
         }
         return ""
     }
