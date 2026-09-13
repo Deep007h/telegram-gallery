@@ -35,11 +35,32 @@ import com.teledrive.app.ui.navigation.Screen
 
 class MainActivity : ComponentActivity() {
 
+    private val permissionLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+    ) {
+        TeleDriveApplication.instance.deviceMediaRepository.invalidateCache()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         enableEdgeToEdge()
         WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        val requiredPermissions = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(
+                android.Manifest.permission.READ_MEDIA_IMAGES,
+                android.Manifest.permission.READ_MEDIA_VIDEO
+            )
+        } else {
+            arrayOf(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+        val missingPermissions = requiredPermissions.filter {
+            androidx.core.content.ContextCompat.checkSelfPermission(this, it) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+        if (missingPermissions.isNotEmpty()) {
+            permissionLauncher.launch(missingPermissions.toTypedArray())
+        }
 
         val sharedUris = handleIntent(intent)
 
@@ -53,23 +74,31 @@ class MainActivity : ComponentActivity() {
             }
 
             val authState by app.tdLibManager.authState.collectAsState()
+            val localGalleryMode by app.preferences.localGalleryMode.collectAsState(initial = false)
+            val botToken by app.preferences.botToken.collectAsState(initial = "")
+            val loginType by app.preferences.loginType.collectAsState(initial = "phone")
+            val storageChatId by app.preferences.storageChatId.collectAsState(initial = app.preferences.getCachedStorageChatId())
 
             TeleDriveTheme(darkTheme = darkTheme) {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    val navController = rememberNavController()
-
                     when (authState) {
                         is TdLibAuthState.Initial -> {
                             SplashScreen()
                         }
                         else -> {
-                            val startDestination = if (authState is TdLibAuthState.Ready) {
+                            val isAuthed = (authState is TdLibAuthState.Ready) ||
+                                           (loginType == "web" && (storageChatId != null && storageChatId != 0L)) ||
+                                           localGalleryMode ||
+                                           (loginType == "bot" && botToken.isNotBlank())
+
+                            val startDestination = if (isAuthed) {
                                 Screen.Explorer.createRoute("/")
                             } else {
                                 Screen.Auth.route
                             }
 
                             key(startDestination) {
+                                val navController = rememberNavController()
                                 NavGraph(
                                     navController = navController,
                                     startDestination = startDestination,
@@ -89,14 +118,24 @@ class MainActivity : ComponentActivity() {
         when (intent.action) {
             Intent.ACTION_SEND -> {
                 if (intent.type != null) {
-                    val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                    val uri: Uri? = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                    }
                     uri?.let { uris.add(it) }
                 }
             }
             Intent.ACTION_SEND_MULTIPLE -> {
                 if (intent.type != null) {
-                    val uriList = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
-                    uriList?.let { uris.addAll(it) }
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)?.let { uris.addAll(it) }
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val uriList = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+                        uriList?.let { uris.addAll(it) }
+                    }
                 }
             }
         }

@@ -13,20 +13,20 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
-// ── Brand palette (Google Photos inspired) ────────────────────────────
-val GoogleDarkBackground = Color(0xFF0F0F14)
-val GoogleDarkSurface = Color(0xFF1A1A22)
-val GoogleDarkCard = Color(0xFF25252F)
-val GoogleDarkCardElevated = Color(0xFF2D2D38)
-val GooglePillSurface = Color(0xFF2A2A36)
+// ── Brand palette (Google Photos inspired AMOLED Deep Black) ────────
+val GoogleDarkBackground = Color(0xFF000000)       // Pure Deepest AMOLED Black
+val GoogleDarkSurface = Color(0xFF0D0E11)          // Deep Black Surface
+val GoogleDarkCard = Color(0xFF131418)             // Elevated Card Background
+val GoogleDarkCardElevated = Color(0xFF1C1D22)     // High-Elevation Container
+val GooglePillSurface = Color(0xFF1C1D22)          // Filter / Button Pill Surface
 val GooglePillSelected = Color(0xFFE8EAED)
-val GooglePrimaryAccent = Color(0xFFA8C7FA)        // Photos light blue
-val GoogleSecondaryAccent = Color(0xFFD0BCFF)
-val GoogleTertiaryAccent = Color(0xFFFFD8A8)        // warm orange for highlights
+val GooglePrimaryAccent = Color(0xFFA8C7FA)        // Google Photos light blue
+val GoogleSecondaryAccent = Color(0xFF7FCFFF)      // Crisp Cyan-Blue Accent (No Purple)
+val GoogleTertiaryAccent = Color(0xFFFFD8A8)        // Warm orange for highlights
 val GoogleDanger = Color(0xFFFF7A7A)
-val GoogleOnDarkText = Color(0xFFE3E2E6)
-val GoogleOnDarkTextMuted = Color(0xFFB6B5BD)
-val GoogleOnDarkTextSubtle = Color(0xFF8A8993)
+val GoogleOnDarkText = Color(0xFFF1F3F4)           // Google High-Contrast White
+val GoogleOnDarkTextMuted = Color(0xFFBDC1C6)      // Google Muted Gray
+val GoogleOnDarkTextSubtle = Color(0xFF80868B)     // Google Subtle Gray
 
 // Light palette
 val GoogleLightBackground = Color(0xFFF7F8FB)
@@ -37,22 +37,27 @@ val GoogleOnLightText = Color(0xFF1B1B1F)
 private val DarkColorScheme = darkColorScheme(
     primary = GooglePrimaryAccent,
     onPrimary = Color(0xFF003063),
-    primaryContainer = Color(0xFF1F3A66),
+    primaryContainer = Color(0xFF004A77),
     onPrimaryContainer = Color(0xFFD6E3FF),
     secondary = GoogleSecondaryAccent,
-    onSecondary = Color(0xFF371E73),
-    secondaryContainer = Color(0xFF4F378B),
-    onSecondaryContainer = Color(0xFFEADDFF),
+    onSecondary = Color(0xFF00363D),
+    secondaryContainer = Color(0xFF004F58),
+    onSecondaryContainer = Color(0xFF97F0FF),
     tertiary = GoogleTertiaryAccent,
     background = GoogleDarkBackground,
     onBackground = GoogleOnDarkText,
-    surface = GoogleDarkSurface,
+    surface = GoogleDarkBackground,
     onSurface = GoogleOnDarkText,
     surfaceVariant = GoogleDarkCard,
     onSurfaceVariant = GoogleOnDarkTextMuted,
     surfaceTint = GooglePrimaryAccent,
-    outline = Color(0xFF3A3A45),
-    outlineVariant = Color(0xFF2A2A36),
+    surfaceContainerLowest = Color(0xFF000000),
+    surfaceContainerLow = Color(0xFF090A0D),
+    surfaceContainer = Color(0xFF0D0E11),
+    surfaceContainerHigh = Color(0xFF131418),
+    surfaceContainerHighest = Color(0xFF1C1D22),
+    outline = Color(0xFF282A30),
+    outlineVariant = Color(0xFF1A1B20),
     error = GoogleDanger,
     onError = Color(0xFF690005)
 )

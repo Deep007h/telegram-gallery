@@ -1,8 +1,10 @@
 package com.teledrive.app.ui.search
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -94,22 +96,27 @@ fun SearchSheet(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            val suggestions = listOf("People & Pets", "Recent Moments", "Screenshots", "Videos", "Documents", "Favorites")
+            val suggestions = remember {
+                listOf("People & Pets", "Recent Moments", "Screenshots", "Videos", "Documents", "Favorites")
+            }
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.heightIn(max = 240.dp)
             ) {
-                items(suggestions.size) { index ->
+                items(
+                    suggestions.size,
+                    key = { suggestions[it] },
+                    contentType = { "suggestion" }
+                ) { index ->
                     val prompt = suggestions[index]
                     Surface(
+                        onClick = {
+                            searchQuery = prompt
+                            onQueryChange(prompt)
+                        },
                         color = GoogleDarkCard,
                         shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                searchQuery = prompt
-                                onQueryChange(prompt)
-                            }
+                        modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
@@ -146,7 +153,11 @@ fun SearchSheet(
 
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
+                // Chips overflow on 360dp screens (4 fixed chips > width) leaving
+                // the last one clipped with no way to reach it.
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
             ) {
                 FilterChip(
                     selected = searchQuery.isEmpty(),

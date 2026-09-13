@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileWriter
 import java.io.PrintWriter
@@ -30,7 +31,8 @@ data class LogEntry(
     val threadName: String = Thread.currentThread().name
 ) {
     fun toFormattedString(dateFormat: SimpleDateFormat): String {
-        val timeStr = dateFormat.format(Date(timestamp))
+        // dateFormat must be thread-confined (see ThreadLocal holder).
+        val timeStr = synchronized(dateFormat) { dateFormat.format(Date(timestamp)) }
         val threadStr = "[Thread:${threadName}]"
         val levelStr = "[${level.name}]"
         val tagStr = "[${tag}]"
@@ -44,12 +46,20 @@ object AppLogger {
     private const val MAX_MEMORY_LOGS = 1000
     private const val MAX_LOG_FILE_SIZE_BYTES = 5 * 1024 * 1024L // 5 MB
 
-    private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
+    // SimpleDateFormat is not thread-safe: the old shared instance was touched
+    // from every IO thread (corrupted timestamps / crashes under sync bursts).
+    private val dateFormatHolder = ThreadLocal.withInitial {
+        SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
+    }
+    private fun dateFormat(): SimpleDateFormat = dateFormatHolder.get()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val logQueue = ConcurrentLinkedQueue<LogEntry>()
     private val _liveLogs = MutableStateFlow<List<LogEntry>>(emptyList())
     val liveLogs: StateFlow<List<LogEntry>> = _liveLogs.asStateFlow()
+    // Coalesce bursts: sync can emit 100s of lines/sec; updating StateFlow per
+    // line recomposes LogsViewer per line. Batch behind a short debounce.
+    @Volatile private var logFlushScheduled = false
 
     private var primaryLogFile: File? = null
     private var internalLogFile: File? = null
@@ -160,19 +170,66 @@ object AppLogger {
 
         logQueue.add(entry)
 
-        scope.launch {
-            // Update in-memory ring buffer
-            val current = _liveLogs.value
-            val updated = if (current.size >= MAX_MEMORY_LOGS) {
-                current.drop(current.size - MAX_MEMORY_LOGS + 1) + entry
-            } else {
-                current + entry
+        // Batch live-log + disk flushes: one coroutine per log line previously
+        // spawned hundreds of concurrent writers under sync bursts. Schedule a
+        // single delayed flush instead (150ms coalescing window).
+        if (!logFlushScheduled) {
+            logFlushScheduled = true
+            scope.launch {
+                try {
+                    kotlinx.coroutines.delay(150)
+                } catch (_: Exception) {}
+                logFlushScheduled = false
+                // Drain once for both live view and disk (cap batch to bound work).
+                val batch = mutableListOf<LogEntry>()
+                while (true) {
+                    val e = logQueue.poll() ?: break
+                    batch.add(e)
+                    if (batch.size >= 500) break
+                }
+                if (batch.isNotEmpty()) {
+                    val current = _liveLogs.value
+                    val combined = current + batch
+                    _liveLogs.value = if (combined.size > MAX_MEMORY_LOGS) {
+                        combined.takeLast(MAX_MEMORY_LOGS)
+                    } else combined
+                    writeBatchToDisk(batch)
+                }
+                // If the queue refilled mid-flush (burst), schedule a follow-up
+                // instead of dropping those lines until the next log call.
+                if (logQueue.isNotEmpty() && !logFlushScheduled) {
+                    logFlushScheduled = true
+                    scope.launch {
+                        try { kotlinx.coroutines.delay(150) } catch (_: Exception) {}
+                        logFlushScheduled = false
+                        val followUp = mutableListOf<LogEntry>()
+                        while (true) {
+                            val e = logQueue.poll() ?: break
+                            followUp.add(e)
+                            if (followUp.size >= 500) break
+                        }
+                        if (followUp.isNotEmpty()) {
+                            val cur = _liveLogs.value
+                            val comb = cur + followUp
+                            _liveLogs.value = if (comb.size > MAX_MEMORY_LOGS) comb.takeLast(MAX_MEMORY_LOGS) else comb
+                            writeBatchToDisk(followUp)
+                        }
+                    }
+                }
             }
-            _liveLogs.value = updated
-
-            // Write to disk
-            writePendingLogs()
         }
+    }
+
+    private fun writeBatchToDisk(entries: List<LogEntry>) {
+        if (entries.isEmpty()) return
+        val text = buildString {
+            val fmt = dateFormat()
+            entries.forEach { entry ->
+                appendLine(entry.toFormattedString(fmt))
+            }
+        }
+        writeToFile(primaryLogFile, text)
+        writeToFile(internalLogFile, text)
     }
 
     @Synchronized
@@ -185,14 +242,21 @@ object AppLogger {
 
         if (entriesToWrite.isEmpty()) return
 
+        val fmt = dateFormat()
         val text = buildString {
             entriesToWrite.forEach { entry ->
-                appendLine(entry.toFormattedString(dateFormat))
+                appendLine(entry.toFormattedString(fmt))
             }
         }
 
         writeToFile(primaryLogFile, text)
         writeToFile(internalLogFile, text)
+        // Keep the live view consistent when flushed synchronously (crash path).
+        try {
+            val current = _liveLogs.value
+            val combined = current + entriesToWrite
+            _liveLogs.value = if (combined.size > MAX_MEMORY_LOGS) combined.takeLast(MAX_MEMORY_LOGS) else combined
+        } catch (_: Exception) {}
     }
 
     private fun flushSync() {
@@ -221,8 +285,35 @@ object AppLogger {
         return primaryLogFile?.absolutePath ?: internalLogFile?.absolutePath ?: "Logs not initialized"
     }
 
+    /**
+     * Reads the full log file. Must not run on the Main thread (5MB read).
+     * Callers should use Dispatchers.IO; this helper enforces it when called
+     * from Main by offloading (blocking callers should prefer the suspending
+     * overload below).
+     */
     fun getAllLogsText(): String {
+        // Fast path off-main; if on Main, avoid ANR by returning a truncated
+        // in-memory snapshot instead of reading the 5MB file synchronously.
+        val onMain = android.os.Looper.myLooper() == android.os.Looper.getMainLooper()
+        if (onMain) {
+            return try {
+                _liveLogs.value.takeLast(200).joinToString("\n") {
+                    it.toFormattedString(dateFormat())
+                }.ifBlank { "Loading logs…" }
+            } catch (e: Exception) {
+                "Error reading logs: ${e.message}"
+            }
+        }
         return try {
+            val file = primaryLogFile?.takeIf { it.exists() } ?: internalLogFile?.takeIf { it.exists() }
+            file?.readText() ?: "No log file found"
+        } catch (e: Exception) {
+            "Error reading logs: ${e.message}"
+        }
+    }
+
+    suspend fun getAllLogsTextAsync(): String = withContext(Dispatchers.IO) {
+        try {
             val file = primaryLogFile?.takeIf { it.exists() } ?: internalLogFile?.takeIf { it.exists() }
             file?.readText() ?: "No log file found"
         } catch (e: Exception) {

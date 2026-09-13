@@ -32,11 +32,11 @@ fun StorageStatsCard(
     modifier: Modifier = Modifier
 ) {
     val colors = listOf(
-        Pair("Images", Color(0xFF2196F3)),
-        Pair("Videos", Color(0xFFF44336)),
-        Pair("Audio", Color(0xFFFF9800)),
-        Pair("Documents", Color(0xFF4CAF50)),
-        Pair("Other", Color(0xFF9E9E9E))
+        Pair("Images", Color(0xFF4285F4)),
+        Pair("Videos", Color(0xFFEA4335)),
+        Pair("Audio", Color(0xFFFBBC05)),
+        Pair("Documents", Color(0xFF34A853)),
+        Pair("Other", Color(0xFF80868B))
     )
 
     val counts = listOf(
@@ -47,15 +47,20 @@ fun StorageStatsCard(
         Pair("Other", stats.otherCount)
     )
 
-    Card(
+    androidx.compose.material3.Surface(
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+        color = com.teledrive.app.ui.theme.GoogleDarkCard,
+        border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(modifier = Modifier.padding(18.dp)) {
             Text(
                 text = "${stats.totalFiles} files · ${stats.totalSize.toFormattedSize()}",
-                style = MaterialTheme.typography.titleMedium
+                style = MaterialTheme.typography.titleMedium,
+                color = com.teledrive.app.ui.theme.GoogleOnDarkText,
+                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
             )
 
             Spacer(modifier = Modifier.height(16.dp))

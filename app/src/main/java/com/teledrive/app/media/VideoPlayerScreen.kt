@@ -35,8 +35,8 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import com.teledrive.app.TeleDriveApplication
 import com.teledrive.app.data.db.entity.FileEntity
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -47,76 +47,79 @@ fun VideoPlayerScreen(fileId: Long, onBack: () -> Unit) {
     val fileDao = app.database.fileDao()
     val tdLibManager = app.tdLibManager
 
-    var fileEntity by remember { mutableStateOf<FileEntity?>(null) }
-    var localPath by remember { mutableStateOf<String?>(null) }
+    var fileEntity by remember(fileId) { mutableStateOf<FileEntity?>(null) }
+    var localPath by remember(fileId) { mutableStateOf<String?>(null) }
     val coroutineScope = rememberCoroutineScope()
-    var isLoading by remember { mutableStateOf(true) }
+    var isLoading by remember(fileId) { mutableStateOf(true) }
 
-    val exoPlayer = remember {
+    // Key on fileId so navigating between videos releases the old codec.
+    val exoPlayer = remember(fileId) {
         ExoPlayer.Builder(context).build().apply {
-            playWhenReady = true
+            playWhenReady = false
+        }
+    }
+    DisposableEffect(fileId) {
+        onDispose {
+            try { exoPlayer.pause() } catch (_: Exception) {}
+            try { exoPlayer.release() } catch (_: Exception) {}
         }
     }
 
     LaunchedEffect(fileId) {
-        val files = fileDao.getAllFilesList()
-        val found = files.firstOrNull { it.fileId == fileId }
+        // Room + disk probes off-main; single download path via rehydrate.
+        val found: FileEntity? = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try { fileDao.getById(fileId) } catch (_: Exception) { null }
+        }
         fileEntity = found
-
-        if (found != null) {
-            val tdFileId = found.telegramFileId
-            if (tdFileId != 0) {
-                // Check if already downloaded/cached
+        if (found == null) {
+            isLoading = false
+            return@LaunchedEffect
+        }
+        val hit: String? = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            if (found.telegramFileId != 0) {
                 try {
-                    val tdFile = tdLibManager.getFile(tdFileId)
+                    val tdFile = tdLibManager.getFile(found.telegramFileId)
                     if (tdFile.local.isDownloadingCompleted && tdFile.local.path.isNotEmpty() && File(tdFile.local.path).exists()) {
-                        localPath = tdFile.local.path
-                        isLoading = false
-                        return@LaunchedEffect
+                        return@withContext tdFile.local.path
                     }
-                } catch (ignored: Exception) {}
-
-                try {
-                    tdLibManager.startDownload(tdFileId, 32)
-                } catch (ignored: Exception) {}
-
-                // Trigger background download waiter
-                launch {
-                    val path = tdLibManager.downloadFile(tdFileId, 32)
-                    if (path.isNotEmpty() && File(path).exists()) {
-                        localPath = path
-                        isLoading = false
-                    }
-                }
-
-                tdLibManager.fileUpdates
-                    .filter { it.fileId == tdFileId }
-                    .collect { update ->
-                        if (update.isDownloadingCompleted && update.localPath.isNotEmpty() && File(update.localPath).exists()) {
-                            localPath = update.localPath
-                            isLoading = false
-                        }
-                    }
-            } else {
-                isLoading = false
+                } catch (_: Exception) {}
             }
-        } else {
+            null
+        }
+        if (hit != null) {
+            localPath = hit
+            isLoading = false
+            return@LaunchedEffect
+        }
+        if (found.telegramFileId == 0 && found.telegramMessageId == 0L) {
+            isLoading = false
+            return@LaunchedEffect
+        }
+        try {
+            val chatId = if (found.telegramChatId != 0L) found.telegramChatId else tdLibManager.getSavedMessagesChatId()
+            val path = tdLibManager.rehydrateAndDownloadFile(
+                chatId = chatId,
+                messageId = found.telegramMessageId,
+                preferredFileId = found.telegramFileId,
+                priority = 32
+            )
+            if (path.isNotEmpty() && File(path).exists()) {
+                localPath = path
+            }
+        } catch (_: Exception) {
+        } finally {
             isLoading = false
         }
     }
 
     LaunchedEffect(localPath) {
         localPath?.let { path ->
-            val mediaItem = MediaItem.fromUri(Uri.fromFile(File(path)))
-            exoPlayer.setMediaItem(mediaItem)
-            exoPlayer.prepare()
-            exoPlayer.play()
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            exoPlayer.release()
+            try {
+                val mediaItem = MediaItem.fromUri(Uri.fromFile(File(path)))
+                exoPlayer.setMediaItem(mediaItem)
+                exoPlayer.prepare()
+                exoPlayer.play()
+            } catch (_: Exception) {}
         }
     }
 

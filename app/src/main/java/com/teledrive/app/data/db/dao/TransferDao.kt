@@ -56,6 +56,12 @@ interface TransferDao {
     @Query("SELECT * FROM transfers WHERE type = 'UPLOAD' AND file_name = :fileName AND file_size = :fileSize AND status IN ('PENDING', 'IN_PROGRESS') LIMIT 1")
     suspend fun getActiveUpload(fileName: String, fileSize: Long): TransferEntity?
 
-    @Query("SELECT * FROM transfers")
-    suspend fun getAllList(): List<TransferEntity>
+    @Query("SELECT * FROM transfers WHERE backup_session_id = :sessionId")
+    suspend fun getByBackupSessionId(sessionId: String): List<TransferEntity>
+
+    @Query("SELECT * FROM transfers WHERE backup_session_id = :sessionId")
+    fun observeByBackupSessionId(sessionId: String): Flow<List<TransferEntity>>
+
+    @Query("DELETE FROM transfers")
+    suspend fun clearAll()
 }

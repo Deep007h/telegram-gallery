@@ -10,9 +10,8 @@ import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import com.teledrive.app.TeleDriveApplication
 import com.teledrive.app.core.FileUtils
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withTimeout
 import java.io.File
 
 class DownloadWorker(
@@ -79,52 +78,79 @@ class DownloadWorker(
                         tdLibManager.startDownload(tdFileId, 32)
                     } catch (ignored: Exception) {}
 
-                    val timeoutResult = withTimeoutOrNull(180_000L) {
-                        tdLibManager.fileUpdates
-                            .filter { it.fileId == tdFileId }
-                            .collect { update ->
-                                val progress = if (update.expectedSize > 0) {
-                                    ((update.downloadedSize.toFloat() / update.expectedSize) * 100).toInt()
-                                } else if (transferEntity.fileSize > 0) {
-                                    ((update.downloadedSize.toFloat() / transferEntity.fileSize) * 100).toInt()
-                                } else 0
-
-                                transferDao.updateProgress(transferId, update.downloadedSize, System.currentTimeMillis())
-
-                                val progressNotification = notificationManager.createNotification(
-                                    context = context,
-                                    fileName = fileName,
-                                    progress = progress.coerceIn(0, 100),
-                                    isUpload = false
-                                )
-                                try {
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                                        setForeground(ForegroundInfo(transferId.toInt(), progressNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC))
-                                    } else {
-                                        setForeground(ForegroundInfo(transferId.toInt(), progressNotification))
+                    // Throttled progress (see UploadWorker): DB + notification IPC
+                    // on every TDLib event stalls TransferScreen + system UI.
+                    var lastDbWrite = 0L
+                    var lastNotif = 0L
+                    val notifId = transferId.hashCode()
+                    try {
+                        withTimeout(180_000L) {
+                            tdLibManager.fileUpdates
+                                .filter { it.fileId == tdFileId }
+                                .collect { update ->
+                                    val now = System.currentTimeMillis()
+                                    if (now - lastDbWrite >= 400L || update.isDownloadingCompleted) {
+                                        lastDbWrite = now
+                                        try {
+                                            transferDao.updateProgress(transferId, update.downloadedSize, now)
+                                        } catch (_: Exception) {}
                                     }
-                                } catch (ignored: Exception) {}
-
-                                if (update.isDownloadingCompleted && update.localPath.isNotEmpty() && File(update.localPath).exists()) {
-                                    completedLocalPath = update.localPath
-                                    cancel()
+                                    if (now - lastNotif >= 600L || update.isDownloadingCompleted) {
+                                        lastNotif = now
+                                        val progress = if (update.expectedSize > 0) {
+                                            ((update.downloadedSize.toFloat() / update.expectedSize) * 100).toInt()
+                                        } else if (transferEntity.fileSize > 0) {
+                                            ((update.downloadedSize.toFloat() / transferEntity.fileSize) * 100).toInt()
+                                        } else 0
+                                        val progressNotification = notificationManager.createNotification(
+                                            context = context,
+                                            fileName = fileName,
+                                            progress = progress.coerceIn(0, 100),
+                                            isUpload = false
+                                        )
+                                        try {
+                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                                setForeground(ForegroundInfo(notifId, progressNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC))
+                                            } else {
+                                                setForeground(ForegroundInfo(notifId, progressNotification))
+                                            }
+                                        } catch (_: Exception) {}
+                                    }
+                                    if (update.isDownloadingCompleted && update.localPath.isNotEmpty() && File(update.localPath).exists()) {
+                                        completedLocalPath = update.localPath
+                                        throw kotlinx.coroutines.CancellationException("download-complete")
+                                    }
                                 }
-                            }
-                    }
-                    
-                    // If timeout occurred and download is not finished, try one more time with downloadFile
-                    if (timeoutResult == null && completedLocalPath == null) {
-                        val finalPath = tdLibManager.downloadFile(tdFileId, 32)
-                        if (finalPath.isNotEmpty() && File(finalPath).exists()) {
-                            completedLocalPath = finalPath
                         }
+                    } catch (_: Exception) {
+                        // CancellationException("download-complete") = success path;
+                        // TimeoutCancellationException = fall through to fallback.
+                    }
+
+                    // If timeout occurred and download is not finished, try one more time with downloadFile
+                    if (completedLocalPath == null) {
+                        try {
+                            val finalPath = tdLibManager.downloadFile(tdFileId, 32)
+                            if (finalPath.isNotEmpty() && File(finalPath).exists()) {
+                                completedLocalPath = finalPath
+                            }
+                        } catch (_: Exception) {}
                     }
                 }
 
                 if (completedLocalPath == null) {
-                    val finalPath = tdLibManager.downloadFile(tdFileId, 32)
-                    if (finalPath.isNotEmpty() && File(finalPath).exists()) {
-                        completedLocalPath = finalPath
+                    try {
+                        val finalPath = tdLibManager.downloadFile(tdFileId, 32)
+                        if (finalPath.isNotEmpty() && File(finalPath).exists()) {
+                            completedLocalPath = finalPath
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                if (completedLocalPath == null && msgId != 0L) {
+                    val cachedFile = com.teledrive.app.core.FastThumbnailCacheManager.getThumbnailFile(context, msgId.toString())
+                    if (cachedFile.exists() && cachedFile.length() > 0) {
+                        completedLocalPath = cachedFile.absolutePath
                     }
                 }
 
@@ -139,7 +165,7 @@ class DownloadWorker(
 
                     val completedNotification = notificationManager.createCompletedNotification(context, fileName, false)
                     val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                    nm.notify(transferId.toInt(), completedNotification)
+                    nm.notify(transferId.hashCode(), completedNotification)
 
                     return Result.success()
                 }

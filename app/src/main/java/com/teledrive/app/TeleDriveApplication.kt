@@ -22,6 +22,7 @@ import com.teledrive.app.transfer.TransferManager
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.teledrive.app.core.ThumbnailCacheManager
+import kotlinx.coroutines.launch
 import java.io.File
 
 class TeleDriveApplication : Application(), ImageLoaderFactory {
@@ -29,21 +30,31 @@ class TeleDriveApplication : Application(), ImageLoaderFactory {
     override fun newImageLoader(): ImageLoader {
         return ImageLoader.Builder(this)
             .components {
+                add(com.teledrive.app.core.MediaStoreThumbnailFetcher.Factory(this@TeleDriveApplication))
                 add(VideoFrameDecoder.Factory())
             }
             .memoryCache {
                 MemoryCache.Builder(this)
-                    .maxSizePercent(0.25)
+                    .maxSizePercent(0.50) // 50% RAM memory cache for instant scrolling back & forth
+                    .strongReferencesEnabled(true)
                     .build()
             }
             .diskCache {
                 DiskCache.Builder()
                     .directory(File(cacheDir, "coil_disk_cache"))
-                    .maxSizeBytes(250L * 1024 * 1024)
+                    .maxSizeBytes(500L * 1024 * 1024)
                     .build()
             }
-            .crossfade(true)
+            .interceptorDispatcher(com.teledrive.app.core.AppDispatchers.ImageLoader)
+            .fetcherDispatcher(com.teledrive.app.core.AppDispatchers.ImageLoader)
+            .decoderDispatcher(com.teledrive.app.core.AppDispatchers.ImageLoader)
+            .transformationDispatcher(com.teledrive.app.core.AppDispatchers.ImageLoader)
+            .diskCachePolicy(coil.request.CachePolicy.ENABLED)
+            .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
+            .networkCachePolicy(coil.request.CachePolicy.ENABLED)
+            .respectCacheHeaders(false)
             .allowHardware(true)
+            .crossfade(false) // Zero-latency 1-frame instant rendering
             .build()
     }
 
@@ -71,6 +82,9 @@ class TeleDriveApplication : Application(), ImageLoaderFactory {
     lateinit var transferManager: TransferManager
         private set
 
+    lateinit var backupRepository: com.teledrive.app.backup.BackupRepository
+        private set
+
     lateinit var deviceMediaRepository: com.teledrive.app.data.repository.DeviceMediaRepository
         private set
 
@@ -83,6 +97,11 @@ class TeleDriveApplication : Application(), ImageLoaderFactory {
     lateinit var otaUpdateManager: com.teledrive.app.core.ota.OtaUpdateManager
         private set
 
+    lateinit var trashManager: com.teledrive.app.data.trash.TrashManager
+        private set
+
+    val fastThumbnailCacheManager = com.teledrive.app.core.FastThumbnailCacheManager
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -94,6 +113,14 @@ class TeleDriveApplication : Application(), ImageLoaderFactory {
         preferences = AppPreferences(this)
 
         tdLibManager = TdLibManager()
+        val cachedSavedId = preferences.getCachedSavedMessagesChatId()
+        if (cachedSavedId != 0L) {
+            tdLibManager.cachedSavedMessagesChatId = cachedSavedId
+        }
+        val cachedPhoto = preferences.getCachedTelegramProfilePhotoPath()
+        if (cachedPhoto.isNotBlank()) {
+            tdLibManager.setCachedProfilePhotoPath(cachedPhoto)
+        }
         tdLibManager.initialize(this)
 
         thumbnailCacheManager = ThumbnailCacheManager(this, tdLibManager)
@@ -108,9 +135,27 @@ class TeleDriveApplication : Application(), ImageLoaderFactory {
             folderDao = database.folderDao(),
             transferDao = database.transferDao(),
             tdLibManager = tdLibManager,
-            metadataParser = MetadataParser
+            metadataParser = MetadataParser,
+            preferences = preferences
         )
         transferManager = TransferManager(this, database.transferDao())
+        backupRepository = com.teledrive.app.backup.BackupRepository(
+            context = this,
+            backupDao = database.backupDao(),
+            transferDao = database.transferDao(),
+            transferManager = transferManager,
+            channelRepository = channelRepository,
+            preferences = preferences
+        )
+        trashManager = com.teledrive.app.data.trash.TrashManager(this, localRepository, tdLibManager)
+
+        // Schedule periodic backup in background
+        com.teledrive.app.backup.ScheduledBackupWorker.schedule(this)
+
+        // Eager Pre-warming of HyperOS-grade thumbnail cache map
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            fastThumbnailCacheManager.preWarmCacheMap(this@TeleDriveApplication)
+        }
     }
 
     override fun onTerminate() {

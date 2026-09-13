@@ -59,12 +59,21 @@ private val DarkColors = darkColorScheme(
     onBackground = md_theme_dark_onBackground,
     surface = md_theme_dark_surface,
     onSurface = md_theme_dark_onSurface,
+    surfaceVariant = androidx.compose.ui.graphics.Color(0xFF131418),
+    onSurfaceVariant = androidx.compose.ui.graphics.Color(0xFFBDC1C6),
+    surfaceContainerLowest = androidx.compose.ui.graphics.Color(0xFF000000),
+    surfaceContainerLow = androidx.compose.ui.graphics.Color(0xFF090A0D),
+    surfaceContainer = androidx.compose.ui.graphics.Color(0xFF0D0E11),
+    surfaceContainerHigh = androidx.compose.ui.graphics.Color(0xFF131418),
+    surfaceContainerHighest = androidx.compose.ui.graphics.Color(0xFF1C1D22),
+    outline = androidx.compose.ui.graphics.Color(0xFF282A30),
+    outlineVariant = androidx.compose.ui.graphics.Color(0xFF1A1B20),
 )
 
 @Composable
 fun TeleDriveTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = true,
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {
@@ -80,8 +89,11 @@ fun TeleDriveTheme(
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
-            window.statusBarColor = colorScheme.background.toArgb()
-            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
+            window.statusBarColor = android.graphics.Color.TRANSPARENT
+            window.navigationBarColor = android.graphics.Color.TRANSPARENT
+            val insets = WindowCompat.getInsetsController(window, view)
+            insets.isAppearanceLightStatusBars = !darkTheme
+            insets.isAppearanceLightNavigationBars = !darkTheme
         }
     }
 

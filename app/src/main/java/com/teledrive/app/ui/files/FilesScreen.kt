@@ -76,7 +76,8 @@ fun FilesScreen(
         }
     }
 
-    // Deduplicate and filter files
+    // Deduplicate and filter files. Sorted DESC (newest first) to match the
+    // Photos feed; the old ASC order put the oldest files on top (bug).
     val distinctFiles = remember(files, searchQuery) {
         val list = if (searchQuery.isEmpty()) files
         else files.filter { it.fileName.contains(searchQuery, ignoreCase = true) }
@@ -85,10 +86,11 @@ fun FilesScreen(
             if (it.telegramMessageId != 0L) "${it.telegramChatId}_${it.telegramMessageId}"
             else if (it.fileId != 0L) "file_${it.fileId}"
             else "${it.fileName}_${it.fileSize}"
-        }.sortedBy { it.uploadTimestamp }
+        }.sortedByDescending { it.uploadTimestamp }
     }
 
     // Group files by formatted date (e.g. "March 1", "June 16", "July 12")
+    // SimpleDateFormat is not thread-safe: confine to this remember block.
     val groupedByDate = remember(distinctFiles) {
         val dateFormat = SimpleDateFormat("MMMM d", Locale.getDefault())
         distinctFiles.groupBy {
@@ -231,9 +233,16 @@ fun FilesScreen(
                             }
                         }
 
-                        // 2. Group files into bubbles with item layout
+                        // 2. Group files into bubbles with item layout.
+                        // Stable per-file keys: the old chunk key (firstId_size)
+                        // shifted whenever a new message arrived, recomposing all
+                        // bubbles and jumping scroll position.
                         val chunks = filesInDate.chunked(5)
-                        items(chunks, key = { chunk -> "bubble_${chunk.first().fileId}_${chunk.size}" }) { chunkFiles ->
+                        items(
+                            chunks,
+                            key = { chunk -> chunk.joinToString("|") { "${it.telegramChatId}_${it.telegramMessageId}_${it.fileId}" } },
+                            contentType = { "bubble" }
+                        ) { chunkFiles ->
                             TelegramGroupedFileBubble(
                                 items = chunkFiles,
                                 onItemClick = onFileClick,
@@ -246,9 +255,11 @@ fun FilesScreen(
                 }
             }
 
-            // Action Bottom Sheet for Selected File
+            // Action Bottom Sheet for Selected File.
+            // Hoist sheetState: remembering it inside `let{}` recreates it on
+            // every open (animation jank + state loss).
+            val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
             selectedFileMenu?.let { menuFile ->
-                val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
                 ModalBottomSheet(
                     onDismissRequest = { selectedFileMenu = null },
                     sheetState = sheetState,
@@ -382,8 +393,9 @@ private fun FileOptionMenuItem(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
-            .padding(vertical = 12.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(imageVector = icon, contentDescription = null, tint = iconColor, modifier = Modifier.size(22.dp))
@@ -475,6 +487,9 @@ fun TelegramFileItemRow(
     val isImage = file.mimeType.startsWith("image/") || file.fileName.endsWith(".png", true) || file.fileName.endsWith(".jpg", true)
     val iconBgColor = getTelegramFileColor(file.fileName, file.mimeType)
     val formattedSizeAndExt = formatTelegramFileSizeAndExt(file.fileSize, file.fileName, file.mimeType)
+    // combinedClickable expects () -> Unit; the caller's (FileEntity)->Unit was
+    // already bound at the call site (onLongClick = { onLongClick(file) }).
+    val onLongPress: () -> Unit = { onLongClick() }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -484,20 +499,31 @@ fun TelegramFileItemRow(
         Row(
             modifier = Modifier
                 .weight(1f)
+                .clip(RoundedCornerShape(10.dp))
                 .combinedClickable(
                     onClick = {
+                        // Single stat, single dispatcher hop. The old code did
+                        // two withContext(IO) switches per tap (latency + churn).
                         scope.launch {
-                            val downloadDir = FileUtils.getDownloadDir(context)
-                            val localFile = withContext(Dispatchers.IO) { File(downloadDir, file.fileName) }
-                            val exists = withContext(Dispatchers.IO) { localFile.exists() }
+                            val exists = withContext(Dispatchers.IO) {
+                                try {
+                                    val downloadDir = FileUtils.getDownloadDir(context)
+                                    File(downloadDir, file.fileName).exists()
+                                } catch (_: Exception) { false }
+                            }
                             if (exists) {
-                                FileUtils.openFile(context, localFile.absolutePath, file.fileName)
+                                try {
+                                    val downloadDir = FileUtils.getDownloadDir(context)
+                                    FileUtils.openFile(context, File(downloadDir, file.fileName).absolutePath, file.fileName)
+                                } catch (_: Exception) {
+                                    onClick()
+                                }
                             } else {
                                 onClick()
                             }
                         }
                     },
-                    onLongClick = onLongClick
+                    onLongClick = onLongPress
                 ),
             verticalAlignment = Alignment.CenterVertically
         ) {

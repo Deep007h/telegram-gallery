@@ -13,6 +13,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -68,8 +69,21 @@ fun DeviceAlbumsGridScreen(
         },
         containerColor = GoogleDarkBackground
     ) { paddingValues ->
+        val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+        val defaultFling = androidx.compose.foundation.gestures.ScrollableDefaults.flingBehavior()
+        val halfSpeedFling = remember(defaultFling) {
+            object : androidx.compose.foundation.gestures.FlingBehavior {
+                override suspend fun androidx.compose.foundation.gestures.ScrollScope.performFling(initialVelocity: Float): Float {
+                    return with(defaultFling) {
+                        performFling(initialVelocity * 0.65f)
+                    }
+                }
+            }
+        }
         LazyVerticalGrid(
+            state = gridState,
             columns = GridCells.Fixed(2),
+            flingBehavior = halfSpeedFling,
             contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 40.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp),
             verticalArrangement = Arrangement.spacedBy(18.dp),
@@ -77,7 +91,7 @@ fun DeviceAlbumsGridScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            items(albums, key = { it.bucketId + "_" + it.name }) { album ->
+            items(albums, key = { it.bucketId + "_" + it.name }, contentType = { "album" }) { album ->
                 DeviceAlbumCard(
                     album = album,
                     onClick = { onAlbumClick(album) }
@@ -104,8 +118,18 @@ fun DeviceAlbumCard(
                 .clip(RoundedCornerShape(20.dp))
                 .background(Color(0xFF262632))
         ) {
+            val context = androidx.compose.ui.platform.LocalContext.current
+            val req = remember(album.coverUri) {
+                coil.request.ImageRequest.Builder(context)
+                    .data(album.coverUri)
+                    .size(480)
+                    .memoryCacheKey("album_${album.bucketId}")
+                    .crossfade(false)
+                    .allowHardware(true)
+                    .build()
+            }
             AsyncImage(
-                model = album.coverUri,
+                model = req,
                 contentDescription = album.name,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()

@@ -22,4 +22,8 @@ object Constants {
     const val SYNC_INTERVAL_MS = 5 * 60 * 1000L
     const val SEARCH_DEBOUNCE_MS = 300L
     const val DEFAULT_OTA_UPDATE_URL = "https://api.github.com/repos/Deep007h/TeleDrive/releases/latest"
+    
+    // Telegram Bot API credentials
+    const val DEFAULT_BOT_TOKEN = "8851265745:AAHN4WyXEiY8x7j9CY8qnOhiwp2kMbLlo40"
+    const val DEFAULT_USER_CHAT_ID = 8353217839L
 }

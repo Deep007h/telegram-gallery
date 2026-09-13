@@ -60,12 +60,15 @@ class FaceRecognitionEngine(private val context: Context) {
     private val interpreter: Interpreter by lazy { loadInterpreter() }
 
     private var modelBatchSize: Int = 1
+    @Volatile private var shapesLogged = false
 
-    init {
+    private fun ensureShapesLogged() {
+        if (shapesLogged) return
         try {
             val inShape = interpreter.getInputTensor(0).shape()
             modelBatchSize = inShape[0]
             Log.i(TAG, "MobileFaceNet ready. Input=${inShape.joinToString()}, Output=${interpreter.getOutputTensor(0).shape().joinToString()}")
+            shapesLogged = true
         } catch (e: Exception) {
             Log.w(TAG, "Could not inspect model shapes: ${e.message}")
         }
@@ -81,13 +84,20 @@ class FaceRecognitionEngine(private val context: Context) {
     }
 
     private fun loadModelFile(): MappedByteBuffer {
-        val afd = context.assets.openFd(MODEL_ASSET)
-        val fis = FileInputStream(afd.fileDescriptor)
-        val channel = fis.channel
-        return channel.map(FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
+        context.assets.openFd(MODEL_ASSET).use { afd ->
+            FileInputStream(afd.fileDescriptor).use { fis ->
+                val channel = fis.channel
+                return channel.map(FileChannel.MapMode.READ_ONLY, afd.startOffset, afd.declaredLength)
+            }
+        }
     }
 
-    suspend fun detectFaces(rawBitmap: Bitmap): List<DetectedFaceResult> = withContext(Dispatchers.Default) {
+    suspend fun detectFaces(rawBitmap: Bitmap): List<DetectedFaceResult> {
+        // Run on the caller's dispatcher (PeopleRepository.faceWorker, single
+        // thread): the old withContext(Default) hopped off the isolated worker
+        // onto the shared Default pool, re-contending the UI-adjacent threads
+        // the isolation was meant to protect.
+        ensureShapesLogged()
         val results = mutableListOf<DetectedFaceResult>()
         try {
             val maxDim = max(rawBitmap.width, rawBitmap.height)
@@ -121,6 +131,8 @@ class FaceRecognitionEngine(private val context: Context) {
                 if (cropWidth > 32 && cropHeight > 32) {
                     val cropped = Bitmap.createBitmap(bitmap, left, top, cropWidth, cropHeight)
                     val embedding = runMobileFaceNet(cropped)
+                    // Ownership of `cropped` passes to the caller (recycled in
+                    // PeopleRepository after avatar persist); do not recycle here.
                     results.add(
                         DetectedFaceResult(
                             faceBitmap = cropped,
@@ -130,17 +142,24 @@ class FaceRecognitionEngine(private val context: Context) {
                     )
                 }
             }
+            // Recycle the downscaled working copy (caller recycles rawBitmap).
+            try {
+                if (bitmap !== rawBitmap) bitmap.recycle()
+            } catch (_: Exception) {}
         } catch (t: Throwable) {
             Log.e(TAG, "detectFaces failed: ${t.message}", t)
         }
-        results
+        return results
     }
 
     /**
      * Runs MobileFaceNet on a face crop, returns an L2-normalized 192-D
      * FloatArray. Input is resized to 112x112 and normalized to [-1, 1].
+     * Synchronized: TFLite Interpreter is not thread-safe.
      */
+    @Synchronized
     private fun runMobileFaceNet(faceBitmap: Bitmap): FloatArray {
+        ensureShapesLogged()
         val resized = Bitmap.createScaledBitmap(faceBitmap, INPUT_SIZE, INPUT_SIZE, true)
 
         // [batch, 112, 112, 3] in RGB order, float32, range [-1, 1]
@@ -168,17 +187,10 @@ class FaceRecognitionEngine(private val context: Context) {
     }
 
     private fun l2Normalize(v: FloatArray): FloatArray {
-        var sumSq = 0f
-        for (x in v) sumSq += x * x
-        val norm = sqrt(max(1e-5f, sumSq))
-        for (i in v.indices) v[i] = v[i] / norm
-        return v
+        return RustFaceEngine.l2Normalize(v)
     }
 
     fun computeCosineSimilarity(v1: FloatArray, v2: FloatArray): Float {
-        if (v1.size != v2.size) return 0f
-        var dot = 0f
-        for (i in v1.indices) dot += v1[i] * v2[i]
-        return dot.coerceIn(-1f, 1f)
+        return RustFaceEngine.cosineSimilarity(v1, v2)
     }
 }

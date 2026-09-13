@@ -9,7 +9,8 @@ import androidx.room.PrimaryKey
     tableName = "transfers",
     indices = [
         Index(value = ["status"]),
-        Index(value = ["created_at"])
+        Index(value = ["created_at"]),
+        Index(value = ["backup_session_id"])
     ]
 )
 data class TransferEntity(
@@ -24,6 +25,7 @@ data class TransferEntity(
     @ColumnInfo(name = "telegram_chat_id") val telegramChatId: Long,
     @ColumnInfo(name = "telegram_message_id") val telegramMessageId: Long? = null,
     @ColumnInfo(name = "error_message") val errorMessage: String? = null,
+    @ColumnInfo(name = "backup_session_id") val backupSessionId: String? = null,
     @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis(),
     @ColumnInfo(name = "updated_at") val updatedAt: Long = System.currentTimeMillis()
 )

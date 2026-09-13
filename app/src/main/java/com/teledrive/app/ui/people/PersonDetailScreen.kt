@@ -90,15 +90,28 @@ fun PersonDetailScreen(
                     Box(
                         modifier = Modifier
                             .size(72.dp)
-                            .shadow(8.dp, CircleShape)
                             .clip(CircleShape)
                             .background(Color(0xFF252533))
                             .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape),
                         contentAlignment = Alignment.Center
                     ) {
-                        if (person.coverFacePath.isNotEmpty() && File(person.coverFacePath).exists()) {
+                        val heroExists = remember(person.coverFacePath) {
+                            try {
+                                person.coverFacePath.isNotEmpty() && File(person.coverFacePath).exists()
+                            } catch (_: Exception) { false }
+                        }
+                        if (heroExists) {
+                            val ctx = androidx.compose.ui.platform.LocalContext.current
+                            val req = remember(person.coverFacePath) {
+                                coil.request.ImageRequest.Builder(ctx)
+                                    .data(File(person.coverFacePath))
+                                    .size(144)
+                                    .crossfade(false)
+                                    .allowHardware(true)
+                                    .build()
+                            }
                             AsyncImage(
-                                model = File(person.coverFacePath),
+                                model = req,
                                 contentDescription = person.name,
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize()
@@ -145,14 +158,16 @@ fun PersonDetailScreen(
             }
 
             // Photos Grid
+            val personGridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
             LazyVerticalGrid(
+                state = personGridState,
                 columns = GridCells.Fixed(3),
                 contentPadding = PaddingValues(start = 2.dp, end = 2.dp, top = 4.dp, bottom = 90.dp),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
                 modifier = Modifier.fillMaxSize()
             ) {
-                items(person.cloudFiles, key = { it.fileId }) { cloudFile ->
+                items(person.cloudFiles, key = { it.fileId }, contentType = { "media" }) { cloudFile ->
                     GoogleMediaTile(
                         item = cloudFile,
                         onClick = { onPhotoClick(cloudFile) }

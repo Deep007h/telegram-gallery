@@ -13,6 +13,9 @@ class TransferNotificationManager {
 
     companion object {
         const val NOTIFICATION_CHANNEL_ID = "teledrive_transfers"
+        // createNotificationChannel is an IPC + getSystemService lookup; the old
+        // code ran it on every progress tick (dozens/sec). Cache per-process.
+        @Volatile private var channelCreated = false
     }
 
     fun createNotification(
@@ -21,17 +24,20 @@ class TransferNotificationManager {
         progress: Int,
         isUpload: Boolean
     ): Notification {
-        createChannel(context)
+        ensureChannel(context)
 
         val title = if (isUpload) "Uploading $fileName" else "Downloading $fileName"
         val icon = if (isUpload) android.R.drawable.stat_sys_upload else android.R.drawable.stat_sys_download
 
+        // Unique requestCode per file: requestCode 0 for every transfer made all
+        // Cancel PendingIntents collide (last one wins, cancels wrong transfer).
         val cancelIntent = Intent(context, TransferForegroundService::class.java).apply {
             action = "CANCEL_TRANSFER"
+            putExtra("file_name", fileName)
         }
         val pendingCancel = PendingIntent.getService(
             context,
-            0,
+            fileName.hashCode(),
             cancelIntent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
@@ -50,7 +56,7 @@ class TransferNotificationManager {
         fileName: String,
         isUpload: Boolean
     ): Notification {
-        createChannel(context)
+        ensureChannel(context)
 
         val title = if (isUpload) "Upload complete" else "Download complete"
         val icon = if (isUpload) android.R.drawable.stat_sys_upload_done else android.R.drawable.stat_sys_download_done
@@ -65,16 +71,25 @@ class TransferNotificationManager {
     }
 
     private fun createChannel(context: Context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "File Transfers",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Shows progress for active file transfers"
+        ensureChannel(context)
+    }
+
+    private fun ensureChannel(context: Context) {
+        if (channelCreated) return
+        synchronized(Companion) {
+            if (channelCreated) return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    "File Transfers",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Shows progress for active file transfers"
+                }
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                nm.createNotificationChannel(channel)
             }
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.createNotificationChannel(channel)
+            channelCreated = true
         }
     }
 }

@@ -1,14 +1,21 @@
 package com.teledrive.app.ui.albums
 
 import android.net.Uri
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
@@ -36,10 +43,13 @@ fun AlbumDetailScreen(
     album: DeviceAlbum,
     onBack: () -> Unit,
     onUploadItems: (List<LocalMediaItem>) -> Unit,
+    onMoveToTrash: (List<LocalMediaItem>) -> Unit = {},
     onItemClick: (LocalMediaItem) -> Unit = {}
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     var isSelectionMode by remember { mutableStateOf(false) }
     val selectedItemIds = remember { mutableStateListOf<Long>() }
+    var showTrashConfirmDialog by remember { mutableStateOf(false) }
     var activeFullscreenItem by remember { mutableStateOf<LocalMediaItem?>(null) }
 
     Scaffold(
@@ -122,48 +132,85 @@ fun AlbumDetailScreen(
             )
         },
         bottomBar = {
-            if (isSelectionMode && selectedItemIds.isNotEmpty()) {
+            AnimatedVisibility(
+                visible = isSelectionMode && selectedItemIds.isNotEmpty(),
+                enter = slideInVertically(animationSpec = tween(180)) { it } + fadeIn(tween(180)),
+                exit = slideOutVertically(animationSpec = tween(150)) { it } + fadeOut(tween(150))
+            ) {
                 Surface(
                     color = Color(0xFF1E1F2B),
-                    modifier = Modifier.fillMaxWidth()
+                    shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp),
+                    shadowElevation = 8.dp,
+                    modifier = Modifier.fillMaxWidth().navigationBarsPadding()
                 ) {
+                    val chosen = remember(selectedItemIds.toList(), album.items) {
+                        val selectedSet = selectedItemIds.toSet()
+                        album.items.filter { it.id in selectedSet }
+                    }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceAround,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "${selectedItemIds.size} item(s) chosen",
-                            color = Color.White,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium
-                        )
-
-                        Button(
-                            onClick = {
-                                val chosen = album.items.filter { it.id in selectedItemIds }
-                                onUploadItems(chosen)
-                                isSelectionMode = false
-                                selectedItemIds.clear()
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFA8C7FA)),
-                            shape = RoundedCornerShape(20.dp)
+                        // Share
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    val uris = ArrayList(chosen.map { it.contentUri })
+                                    val intent = if (uris.size == 1) {
+                                        android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                                            type = chosen.first().mimeType
+                                            putExtra(android.content.Intent.EXTRA_STREAM, uris.first())
+                                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                    } else {
+                                        android.content.Intent(android.content.Intent.ACTION_SEND_MULTIPLE).apply {
+                                            type = if (chosen.all { it.isVideo }) "video/*" else if (chosen.all { !it.isVideo }) "image/*" else "*/*"
+                                            putParcelableArrayListExtra(android.content.Intent.EXTRA_STREAM, uris)
+                                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                    }
+                                    context.startActivity(android.content.Intent.createChooser(intent, "Share ${chosen.size} item(s)"))
+                                }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Default.CloudUpload,
-                                contentDescription = null,
-                                tint = Color(0xFF0F141C),
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Upload to Cloud",
-                                color = Color(0xFF0F141C),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp
-                            )
+                            Icon(Icons.Default.Share, contentDescription = "Share", tint = Color.White, modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("Share", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                        }
+
+                        // Backup
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    onUploadItems(chosen)
+                                    isSelectionMode = false
+                                    selectedItemIds.clear()
+                                }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Icon(Icons.Default.CloudUpload, contentDescription = "Backup", tint = Color(0xFFA8C7FA), modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("Backup", color = Color(0xFFA8C7FA), fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                        }
+
+                        // Trash
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { showTrashConfirmDialog = true }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = "Trash", tint = Color(0xFFEF4444), modifier = Modifier.size(24.dp))
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("Trash", color = Color(0xFFEF4444), fontSize = 11.sp, fontWeight = FontWeight.Medium)
                         }
                     }
                 }
@@ -171,8 +218,21 @@ fun AlbumDetailScreen(
         },
         containerColor = GoogleDarkBackground
     ) { padding ->
+        val gridState = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
+        val defaultFling = androidx.compose.foundation.gestures.ScrollableDefaults.flingBehavior()
+        val halfSpeedFling = remember(defaultFling) {
+            object : androidx.compose.foundation.gestures.FlingBehavior {
+                override suspend fun androidx.compose.foundation.gestures.ScrollScope.performFling(initialVelocity: Float): Float {
+                    return with(defaultFling) {
+                        performFling(initialVelocity * 0.65f)
+                    }
+                }
+            }
+        }
         LazyVerticalGrid(
+            state = gridState,
             columns = GridCells.Fixed(3),
+            flingBehavior = halfSpeedFling,
             contentPadding = PaddingValues(start = 2.dp, end = 2.dp, top = 2.dp, bottom = 90.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -181,7 +241,7 @@ fun AlbumDetailScreen(
                 .padding(padding)
                 .background(GoogleDarkBackground)
         ) {
-            items(album.items, key = { it.id }) { item ->
+            items(album.items, key = { it.id }, contentType = { if (it.isVideo) "video" else "image" }) { item ->
                 val isSelected = item.id in selectedItemIds
 
                 LocalMediaGridTile(
@@ -211,18 +271,46 @@ fun AlbumDetailScreen(
         }
     }
 
-    if (activeFullscreenItem != null) {
-        LocalFullscreenMediaViewer(
-            initialItem = activeFullscreenItem!!,
-            allItems = album.items,
-            onClose = { activeFullscreenItem = null },
-            onUpload = { itemToUpload ->
-                onUploadItems(listOf(itemToUpload))
+    if (showTrashConfirmDialog) {
+        val chosen = remember(selectedItemIds.toList(), album.items) {
+            val selectedSet = selectedItemIds.toSet()
+            album.items.filter { it.id in selectedSet }
+        }
+        AlertDialog(
+            onDismissRequest = { showTrashConfirmDialog = false },
+            containerColor = Color(0xFF1E293B),
+            icon = { Icon(Icons.Default.Delete, contentDescription = null, tint = Color(0xFFEF4444)) },
+            title = { Text("Move to Trash?", color = Color.White, fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "Move ${chosen.size} item(s) to Trash? You can restore them anytime from Trash in Collections.",
+                    color = Color.LightGray,
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showTrashConfirmDialog = false
+                        onMoveToTrash(chosen)
+                        isSelectionMode = false
+                        selectedItemIds.clear()
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFEF4444))
+                ) {
+                    Text("Move to Trash", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTrashConfirmDialog = false }) {
+                    Text("Cancel", color = Color.Gray)
+                }
             }
         )
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LocalMediaGridTile(
     item: LocalMediaItem,
@@ -231,14 +319,54 @@ fun LocalMediaGridTile(
     onClick: () -> Unit,
     onLongClick: () -> Unit = {}
 ) {
+    val cornerRadius by animateDpAsState(
+        targetValue = if (isSelected) 10.dp else 0.dp,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        label = "localTileCorner"
+    )
+    val tileInset by animateDpAsState(
+        targetValue = if (isSelected) 3.dp else 0.dp,
+        animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+        label = "localTileInset"
+    )
+    val checkScale by animateFloatAsState(
+        targetValue = if (isSelected) 1f else 0.88f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy),
+        label = "localCheckScale"
+    )
+
     Box(
         modifier = Modifier
             .aspectRatio(1f)
             .background(Color(0xFF22232E))
-            .clickable(onClick = onClick)
+            .padding(tileInset)
+            .clip(RoundedCornerShape(cornerRadius))
+            .then(
+                if (isSelected) Modifier.border(2.5.dp, Color(0xFF4285F4), RoundedCornerShape(cornerRadius))
+                else Modifier
+            )
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
     ) {
+        val context = androidx.compose.ui.platform.LocalContext.current
+        val itemId = "local_${item.id}"
+        val cachedThumb = remember(itemId) {
+            com.teledrive.app.core.FastThumbnailCacheManager.getCachedThumbnailPath(itemId)
+        }
+        val displaySource: Any = remember(cachedThumb, item.contentUri) {
+            if (cachedThumb != null) java.io.File(cachedThumb) else item.contentUri
+        }
+        val req = remember(itemId, displaySource) {
+            coil.request.ImageRequest.Builder(context)
+                .data(displaySource)
+                .size(256, 256)
+                .memoryCacheKey("lowres_$itemId")
+                .diskCacheKey("lowres_$itemId")
+                .crossfade(false)
+                .allowHardware(true)
+                .build()
+        }
         AsyncImage(
-            model = item.contentUri,
+            model = req,
             contentDescription = item.displayName,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize()
@@ -292,16 +420,31 @@ fun LocalMediaGridTile(
                     .align(Alignment.TopEnd)
                     .padding(6.dp)
                     .size(22.dp)
-                    .clip(CircleShape)
-                    .background(if (isSelected) Color(0xFF4285F4) else Color.Black.copy(alpha = 0.5f)),
-                contentAlignment = Alignment.Center
+                    .graphicsLayer {
+                        scaleX = checkScale
+                        scaleY = checkScale
+                    }
             ) {
                 if (isSelected) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = "Selected",
-                        tint = Color.White,
-                        modifier = Modifier.size(16.dp)
+                    Box(
+                        contentAlignment = Alignment.Center,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color(0xFF4285F4), CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Check,
+                            contentDescription = "Selected",
+                            tint = Color.White,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .border(1.6.dp, Color.White.copy(alpha = 0.85f), CircleShape)
+                            .background(Color.Black.copy(alpha = 0.35f), CircleShape)
                     )
                 }
             }

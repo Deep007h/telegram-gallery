@@ -21,53 +21,40 @@ import androidx.compose.ui.unit.sp
 
 @Composable
 fun LoadingIndicator(isGrid: Boolean) {
-    val transition = rememberInfiniteTransition(label = "shimmer")
-    val translateAnim by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1000f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "shimmerTranslate"
-    )
-
-    val shimmerBrush = Brush.linearGradient(
-        colors = listOf(
-            Color.LightGray.copy(alpha = 0.3f),
-            Color.LightGray.copy(alpha = 0.6f),
-            Color.LightGray.copy(alpha = 0.3f)
-        ),
-        start = Offset(translateAnim - 200f, translateAnim - 200f),
-        end = Offset(translateAnim, translateAnim)
-    )
-
+    // Static skeleton (no infiniteTransition): the old shimmer drove a global
+    // recomposition every frame (~60fps) for 6-8 cards WHILE the UI was already
+    // busy syncing/decoding, compounding jank. A spinner + static placeholders
+    // communicates loading without per-frame work.
     if (isGrid) {
         LazyVerticalGrid(
             columns = GridCells.Adaptive(160.dp),
             contentPadding = PaddingValues(16.dp),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier.fillMaxSize(),
+            userScrollEnabled = false
         ) {
-            items(6) {
-                SkeletonGridItem(shimmerBrush = shimmerBrush)
+            items(6, contentType = { "skeleton" }) {
+                SkeletonGridItem()
             }
         }
     } else {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(vertical = 8.dp)
+            contentPadding = PaddingValues(vertical = 8.dp),
+            userScrollEnabled = false
         ) {
-            items(8) {
-                SkeletonListItem(shimmerBrush = shimmerBrush)
+            items(8, contentType = { "skeleton" }) {
+                SkeletonListItem()
             }
         }
     }
 }
 
+private val SkeletonBg = Color.LightGray.copy(alpha = 0.25f)
+
 @Composable
-private fun SkeletonGridItem(shimmerBrush: Brush) {
+private fun SkeletonGridItem() {
     Card(
         shape = RoundedCornerShape(12.dp),
         modifier = Modifier
@@ -86,7 +73,7 @@ private fun SkeletonGridItem(shimmerBrush: Brush) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .background(shimmerBrush)
+                    .background(SkeletonBg)
             )
             Spacer(modifier = Modifier.height(4.dp))
             Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
@@ -94,14 +81,14 @@ private fun SkeletonGridItem(shimmerBrush: Brush) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(16.dp)
-                        .background(shimmerBrush)
+                        .background(SkeletonBg)
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Box(
                     modifier = Modifier
                         .width(80.dp)
                         .height(12.dp)
-                        .background(shimmerBrush)
+                        .background(SkeletonBg)
                 )
             }
         }
@@ -109,7 +96,7 @@ private fun SkeletonGridItem(shimmerBrush: Brush) {
 }
 
 @Composable
-private fun SkeletonListItem(shimmerBrush: Brush) {
+private fun SkeletonListItem() {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -119,7 +106,7 @@ private fun SkeletonListItem(shimmerBrush: Brush) {
         Box(
             modifier = Modifier
                 .size(40.dp)
-                .background(shimmerBrush, RoundedCornerShape(8.dp))
+                .background(SkeletonBg, RoundedCornerShape(8.dp))
         )
         Spacer(modifier = Modifier.width(12.dp))
         Column(
@@ -131,14 +118,14 @@ private fun SkeletonListItem(shimmerBrush: Brush) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(16.dp)
-                    .background(shimmerBrush)
+                    .background(SkeletonBg)
             )
             Spacer(modifier = Modifier.height(4.dp))
             Box(
                 modifier = Modifier
                     .width(100.dp)
                     .height(12.dp)
-                    .background(shimmerBrush)
+                    .background(SkeletonBg)
             )
         }
     }

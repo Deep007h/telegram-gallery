@@ -1,12 +1,16 @@
 package com.teledrive.app.ui.cleaner
 
 import android.net.Uri
+import androidx.compose.animation.*
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -35,6 +39,7 @@ import com.teledrive.app.ui.theme.GoogleOnDarkText
 import com.teledrive.app.ui.theme.GoogleOnDarkTextMuted
 import com.teledrive.app.ui.theme.GoogleOnDarkTextSubtle
 import com.teledrive.app.ui.theme.GooglePrimaryAccent
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -63,9 +68,19 @@ fun SmartCleanerScreen(
     LaunchedEffect(Unit) {
         isLoading = true
         try {
-            duplicateGroups = cleanupEngine.findDuplicateImages().first()
-            largeVideoGroups = cleanupEngine.findLargeVideos(50).first()
-            oldMediaGroups = cleanupEngine.findOldMedia(180).first()
+            // Run all scans on IO to avoid blocking the main thread.
+            // Fetch device media ONCE and share across all three scans
+            // (was 3 separate MediaStore cursor scans before).
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                kotlinx.coroutines.coroutineScope {
+                    val dup = async { cleanupEngine.findDuplicateImages().first() }
+                    val large = async { cleanupEngine.findLargeVideos(50).first() }
+                    val old = async { cleanupEngine.findOldMedia(180).first() }
+                    duplicateGroups = dup.await()
+                    largeVideoGroups = large.await()
+                    oldMediaGroups = old.await()
+                }
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         } finally {
@@ -244,7 +259,11 @@ fun SmartCleanerScreen(
             }
 
             // Bottom Action Bar (visible when items selected)
-            if (selectedItemIds.isNotEmpty()) {
+            AnimatedVisibility(
+                visible = selectedItemIds.isNotEmpty(),
+                enter = slideInVertically(animationSpec = tween(180)) { it } + fadeIn(tween(180)),
+                exit = slideOutVertically(animationSpec = tween(150)) { it } + fadeOut(tween(150))
+            ) {
                 val selectedItems = remember(selectedItemIds.toList(), duplicateGroups, largeVideoGroups, oldMediaGroups) {
                     val all = (duplicateGroups + largeVideoGroups + oldMediaGroups).flatMap { it.items }.distinctBy { it.id }
                     all.filter { selectedItemIds.contains(it.id) }
@@ -348,21 +367,33 @@ private fun CleanerGroupCard(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            LazyRow(
+            // Plain Row + horizontalScroll: LazyRow nested inside LazyColumn
+            // creates nested-lazy measurement + extra composition passes that
+            // stutter on scroll. Groups are small (dup sets), Row is cheaper.
+            Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
             ) {
-                items(group.items, key = { it.id }) { item ->
+                for (item in group.items) {
                     val isSelected = selectedItemIds.contains(item.id)
                     Box(
                         modifier = Modifier
                             .size(90.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .background(Color(0xFF22222E))
+                            .then(
+                                if (isSelected) Modifier.border(2.dp, GooglePrimaryAccent, RoundedCornerShape(8.dp))
+                                else Modifier
+                            )
                             .clickable { onToggleSelection(item.id) }
                     ) {
+                        val ctx = androidx.compose.ui.platform.LocalContext.current
                         AsyncImage(
-                            model = item.contentUri,
+                            model = coil.request.ImageRequest.Builder(ctx)
+                                .data(item.contentUri).size(180)
+                                .crossfade(false).allowHardware(true).build(),
                             contentDescription = item.displayName,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()

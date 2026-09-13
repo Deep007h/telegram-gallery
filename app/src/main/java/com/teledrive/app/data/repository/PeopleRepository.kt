@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import com.teledrive.app.TeleDriveApplication
 import com.teledrive.app.ai.DetectedFaceResult
 import com.teledrive.app.ai.FaceRecognitionEngine
+import com.teledrive.app.ai.RustFaceEngine
 import com.teledrive.app.core.AppLogger
 import com.teledrive.app.data.db.entity.FileEntity
 import com.teledrive.app.telegram.TdLibManager
@@ -20,7 +21,10 @@ import org.json.JSONArray
 import org.json.JSONObject
 import androidx.compose.runtime.Immutable
 import android.os.Process
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.max
@@ -49,9 +53,15 @@ class PeopleRepository(
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
-    private val processedFileIds = HashSet<Long>()
+    private val processedFileIds = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
     private val avatarDir = File(context.filesDir, "people_avatars").apply { mkdirs() }
     private val metadataFile = File(context.filesDir, "people_metadata.json")
+    // Face inference + bitmap decode must not run on Dispatchers.IO (it starves
+    // thumbnail fetches on the shared IO pool). Single-threaded Default worker
+    // with ONE reusable scope (was: a fresh CoroutineScope per scan → leak).
+    private val faceWorker = Dispatchers.Default.limitedParallelism(1)
+    private val faceScope = kotlinx.coroutines.CoroutineScope(faceWorker + kotlinx.coroutines.SupervisorJob())
+    @Volatile private var scanJob: kotlinx.coroutines.Job? = null
 
     init {
         loadPersistedClusters()
@@ -145,7 +155,8 @@ class PeopleRepository(
         }
     }
 
-    suspend fun rescanAll(cloudFiles: List<FileEntity>) = withContext(Dispatchers.IO) {
+    suspend fun rescanAll(cloudFiles: List<FileEntity>) {
+        try { scanJob?.cancelAndJoin() } catch (_: Exception) {}
         mutex.withLock {
             processedFileIds.clear()
             avatarDir.deleteRecursively()
@@ -156,11 +167,20 @@ class PeopleRepository(
         scanCloudMediaInternal(cloudFiles, forceRescan = true)
     }
 
-    suspend fun scanCloudMedia(cloudFiles: List<FileEntity>) = withContext(Dispatchers.IO) {
-        scanCloudMediaInternal(cloudFiles, forceRescan = false)
+    suspend fun scanCloudMedia(cloudFiles: List<FileEntity>) {
+        // Drop overlapping bursts (ViewModel debounces to 150ms already); the
+        // previous fire-and-forget storm contended the thumbnail dispatcher.
+        // Reuses one scope (no per-call scope leak) and joins so callers can
+        // fire-and-forget from their own background launch.
+        if (_isScanning.value) return
+        val job = faceScope.launch {
+            scanCloudMediaInternal(cloudFiles, forceRescan = false)
+        }
+        scanJob = job
+        try { job.join() } catch (_: Exception) {}
     }
 
-    private suspend fun scanCloudMediaInternal(cloudFiles: List<FileEntity>, forceRescan: Boolean) = withContext(Dispatchers.IO) {
+    private suspend fun scanCloudMediaInternal(cloudFiles: List<FileEntity>, forceRescan: Boolean) = withContext(faceWorker) {
         if (_isScanning.value) return@withContext
         _isScanning.value = true
 
@@ -222,21 +242,31 @@ class PeopleRepository(
                                 // 0.50 is a safer setting for clustering (more permissive — a face
                                 // that's "likely the same person" merges in, while different people
                                 // score < 0.40 typically).
+                                val dim = face.featureVector.size
                                 var bestClusterIdx = -1
-                                var bestSim = 0.50f
 
-                                for (cIdx in currentClusters.indices) {
-                                    val c = currentClusters[cIdx]
-                                    // A person cannot appear twice in the same photo (file-level de-dup)
-                                    val alreadyHasFaceInThisFile = clusterFilesMap[c.personId]?.any { it.fileId == file.fileId } == true
-
-                                    if (!alreadyHasFaceInThisFile && c.representativeFeature != null) {
-                                        val sim = faceEngine.computeCosineSimilarity(face.featureVector, c.representativeFeature)
-                                        if (sim > bestSim) {
-                                            bestSim = sim
-                                            bestClusterIdx = cIdx
+                                if (currentClusters.isNotEmpty()) {
+                                    val excludeList = mutableListOf<Int>()
+                                    val centroidsFlat = FloatArray(currentClusters.size * dim)
+                                    for (cIdx in currentClusters.indices) {
+                                        val c = currentClusters[cIdx]
+                                        val feat = c.representativeFeature
+                                        val alreadyInFile = clusterFilesMap[c.personId]?.any { it.fileId == file.fileId } == true
+                                        if (feat == null || feat.size != dim || alreadyInFile) {
+                                            excludeList.add(cIdx)
+                                        } else {
+                                            System.arraycopy(feat, 0, centroidsFlat, cIdx * dim, dim)
                                         }
                                     }
+
+                                    bestClusterIdx = RustFaceEngine.batchFindBestCluster(
+                                        faceVec = face.featureVector,
+                                        centroidsFlat = centroidsFlat,
+                                        numCentroids = currentClusters.size,
+                                        dim = dim,
+                                        threshold = 0.50f,
+                                        excludeIndices = if (excludeList.isNotEmpty()) excludeList.toIntArray() else null
+                                    )
                                 }
 
                                 if (bestClusterIdx >= 0) {
@@ -245,17 +275,9 @@ class PeopleRepository(
                                         if (!any { it.fileId == file.fileId }) add(file)
                                     }
 
-                                    // Update cluster centroid with running-mean L2-normalized average
+                                    // Update cluster centroid with running-mean L2-normalized average via Rust / optimized fallback
                                     val updatedFeature = if (matched.representativeFeature != null) {
-                                        val count = matched.faceCount.toFloat()
-                                        val merged = FloatArray(face.featureVector.size) { i ->
-                                            (matched.representativeFeature[i] * count + face.featureVector[i]) / (count + 1f)
-                                        }
-                                        var sumSq = 0f
-                                        for (f in merged) sumSq += f * f
-                                        val norm = sqrt(max(0.00001f, sumSq))
-                                        for (i in merged.indices) merged[i] /= norm
-                                        merged
+                                        RustFaceEngine.updateCentroid(matched.representativeFeature, face.featureVector, matched.faceCount)
                                     } else face.featureVector
 
                                     val updatedFiles = clusterFilesMap[matched.personId] ?: listOf(file)
@@ -265,8 +287,10 @@ class PeopleRepository(
                                         representativeFeature = updatedFeature
                                     )
                                 } else {
-                                    // Create new Person cluster for this distinct individual
-                                    val personId = "person_${System.currentTimeMillis()}_${(0..999).random()}"
+                                    // Create new Person cluster for this distinct individual.
+                                    // UUID avoids collisions when several faces are found
+                                    // within the same millisecond (old timestamp+random did collide).
+                                    val personId = "person_${java.util.UUID.randomUUID()}"
                                     val avatarFile = File(avatarDir, "$personId.jpg")
                                     try {
                                         FileOutputStream(avatarFile).use { out ->
@@ -291,10 +315,21 @@ class PeopleRepository(
                             }
                         }
                         processedFileIds.add(file.fileId)
+                        // Recycle crops + source to bound native memory during long scans.
+                        try {
+                            for (f in faces) {
+                                try { f.faceBitmap.recycle() } catch (_: Exception) {}
+                            }
+                        } catch (_: Exception) {}
+                        try { bitmap.recycle() } catch (_: Exception) {}
                     }
-                    // Yield gently to keep UI buttery smooth
-                    delay(40)
+                    // Longer pace + faceWorker isolation: face scan shares the
+                    // thumbnail dispatcher, so yielding here protects visible tiles.
+                    delay(80)
+                    // Honor cancellation promptly (rescan).
+                    ensureActive()
                 } catch (t: Throwable) {
+                    if (t is kotlinx.coroutines.CancellationException) throw t
                     t.printStackTrace()
                 }
             }
@@ -339,7 +374,7 @@ class PeopleRepository(
         null
     }
 
-    private fun decodeSampledBitmap(path: String, reqWidth: Int = 1000, reqHeight: Int = 1000): Bitmap? {
+    private fun decodeSampledBitmap(path: String, reqWidth: Int = 800, reqHeight: Int = 800): Bitmap? {
         try {
             val options = BitmapFactory.Options().apply {
                 inJustDecodeBounds = true
@@ -357,7 +392,9 @@ class PeopleRepository(
 
             val decodeOptions = BitmapFactory.Options().apply {
                 inSampleSize = sampleSize
-                inPreferredConfig = Bitmap.Config.RGB_565
+                // ARGB_8888 preserves chrominance for MobileFaceNet embeddings;
+                // RGB_565 banding measurably hurts accuracy.
+                inPreferredConfig = Bitmap.Config.ARGB_8888
             }
             return BitmapFactory.decodeFile(path, decodeOptions)
         } catch (t: Throwable) {

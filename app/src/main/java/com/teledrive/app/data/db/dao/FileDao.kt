@@ -62,6 +62,12 @@ interface FileDao {
     @Query("SELECT * FROM files WHERE file_name = :fileName AND file_size = :fileSize LIMIT 1")
     suspend fun getByNameAndSize(fileName: String, fileSize: Long): FileEntity?
 
+    @Query("SELECT * FROM files WHERE file_id = :id LIMIT 1")
+    suspend fun getById(id: Long): FileEntity?
+
+    @Query("DELETE FROM files")
+    suspend fun clearAll()
+
     @Query("SELECT * FROM files WHERE telegram_chat_id = :chatId AND file_name = :fileName AND file_size = :fileSize LIMIT 1")
     suspend fun getByChatNameAndSize(chatId: Long, fileName: String, fileSize: Long): FileEntity?
 
@@ -73,4 +79,7 @@ interface FileDao {
 
     @Query("DELETE FROM files WHERE file_id NOT IN (SELECT MIN(file_id) FROM files GROUP BY file_name, file_size)")
     suspend fun deleteDuplicatesByNameAndSize()
+
+    @Query("DELETE FROM files WHERE telegram_chat_id != :savedMessagesChatId AND telegram_chat_id != 0")
+    suspend fun deleteNonSavedMessages(savedMessagesChatId: Long)
 }

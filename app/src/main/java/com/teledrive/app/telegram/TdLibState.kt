@@ -4,6 +4,7 @@ sealed class TdLibAuthState {
     data object Initial : TdLibAuthState()
     data object WaitTdlibParameters : TdLibAuthState()
     data object WaitPhoneNumber : TdLibAuthState()
+    data class WaitOtherDeviceConfirmation(val link: String) : TdLibAuthState()
     data class WaitCode(val codeType: String = "sms") : TdLibAuthState()
     data class WaitPassword(val hint: String = "", val hasRecoveryEmail: Boolean = false) : TdLibAuthState()
     data object Ready : TdLibAuthState()

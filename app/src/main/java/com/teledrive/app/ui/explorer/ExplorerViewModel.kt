@@ -7,6 +7,7 @@ import com.teledrive.app.TeleDriveApplication
 import com.teledrive.app.data.db.entity.FileEntity
 import com.teledrive.app.data.db.entity.FolderEntity
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +28,16 @@ enum class FileTypeFilter { ALL, IMAGES, VIDEOS, AUDIO, DOCUMENTS, ARCHIVES }
 enum class StorageSource { TELEDRIVE_CHANNEL, SAVED_MESSAGES }
 
 data class PathSegment(val path: String, val name: String)
+
+data class BackupState(
+    val isBackingUp: Boolean = false,
+    val isJustCompleted: Boolean = false,
+    val progress: Float = 0f,
+    val pendingCount: Int = 0,
+    val totalCount: Int = 0,
+    val statusText: String = "",
+    val subText: String = ""
+)
 
 data class ExplorerUiState(
     val currentPath: String = "/",
@@ -52,7 +63,9 @@ data class ExplorerUiState(
     val storageChannelId: Long = 0L,
     val savedMessagesChatId: Long = 0L,
     val storageSource: StorageSource = StorageSource.SAVED_MESSAGES,
-    val activeChatId: Long = 0L
+    val activeChatId: Long = 0L,
+    val storageChatTitle: String = "Saved Messages",
+    val backupState: BackupState = BackupState()
 )
 
 class ExplorerViewModel : ViewModel() {
@@ -68,46 +81,110 @@ class ExplorerViewModel : ViewModel() {
     private var loadFolderJob: Job? = null
     private var mediaFlowJob: Job? = null
     private var allFilesFlowJob: Job? = null
+    private var unifiedRefreshJob: Job? = null
+    private var searchDebounceJob: Job? = null
 
     init {
+        val initialStorageChatId = preferences.getCachedStorageChatId()
+        val initialStorageChatTitle = preferences.getCachedStorageChatTitle()
+        val initialSavedId = TeleDriveApplication.instance.tdLibManager.cachedSavedMessagesChatId
+        val initialChatId = when {
+            initialStorageChatId != 0L -> initialStorageChatId
+            initialSavedId != 0L -> initialSavedId
+            else -> com.teledrive.app.core.Constants.DEFAULT_USER_CHAT_ID
+        }
+        val initialTitle = when {
+            initialStorageChatTitle.isNotBlank() -> initialStorageChatTitle
+            initialChatId == com.teledrive.app.core.Constants.DEFAULT_USER_CHAT_ID -> "Personal Storage (Deep 007h)"
+            else -> "Saved Messages"
+        }
+
+        _uiState.update {
+            it.copy(
+                storageChatTitle = initialTitle,
+                savedMessagesChatId = initialSavedId,
+                storageSource = StorageSource.SAVED_MESSAGES,
+                activeChatId = initialChatId
+            )
+        }
+
+        // 1. Immediately subscribe to local Room DB media and files for active chat
+        listenToMediaAndFiles(initialChatId)
+        loadFolder("/", initialChatId)
+
+        // 2. Immediately load device albums and unified media without network delay
         loadDeviceAlbums()
+        refreshUnifiedMedia(immediate = true)
+
+        // 3. Immediately trigger initial background sync from Telegram
+        viewModelScope.launch {
+            localRepository.syncFromTelegram(initialChatId)
+        }
+
+        // 4. React to changes in storageChatId from Settings
+        viewModelScope.launch {
+            preferences.storageChatId.collect { storedChatId ->
+                val currentTarget = if (storedChatId != null && storedChatId != 0L) storedChatId else preferences.getCachedSavedMessagesChatId()
+                if (currentTarget != 0L && currentTarget != _uiState.value.activeChatId) {
+                    val title = preferences.getCachedStorageChatTitle().ifBlank { "Telegram Storage" }
+                    _uiState.update {
+                        it.copy(
+                            activeChatId = currentTarget,
+                            storageChatTitle = title
+                        )
+                    }
+                    listenToMediaAndFiles(currentTarget)
+                    loadFolder(_uiState.value.currentPath, currentTarget)
+                    loadDeviceAlbums()
+                    refreshUnifiedMedia(immediate = true)
+                    localRepository.syncFromTelegram(currentTarget)
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            preferences.storageChatTitle.collect { title ->
+                if (title.isNotBlank()) {
+                    _uiState.update { it.copy(storageChatTitle = title) }
+                }
+            }
+        }
 
         viewModelScope.launch {
             val savedViewMode = preferences.viewMode.first()
             val mode = if (savedViewMode == "list") ViewMode.LIST else ViewMode.GRID
             _uiState.update { it.copy(viewMode = mode) }
 
-            // 1. Immediately resolve Saved Messages and start listening + syncing in background
-            launch {
-                try {
-                    val savedId = channelRepository.getSavedMessagesChatId()
-                    if (savedId != 0L) {
+            // Observe TDLib auth state and sync storage chat
+            TeleDriveApplication.instance.tdLibManager.authState.collect { authState ->
+                if (authState is com.teledrive.app.telegram.TdLibAuthState.Ready) {
+                    try {
+                        val savedId = channelRepository.getSavedMessagesChatId()
+                        if (savedId != 0L) {
+                            preferences.setSavedMessagesChatId(savedId)
+                            TeleDriveApplication.instance.tdLibManager.cachedSavedMessagesChatId = savedId
+                        }
+
+                        val configuredChatId = preferences.getCachedStorageChatId()
+                        val configuredChatTitle = preferences.getCachedStorageChatTitle()
+                        val effectiveChatId = if (configuredChatId != 0L) configuredChatId else savedId
+                        val effectiveChatTitle = if (configuredChatTitle.isNotBlank()) configuredChatTitle else "Saved Messages"
+
                         _uiState.update {
                             it.copy(
                                 savedMessagesChatId = savedId,
                                 storageSource = StorageSource.SAVED_MESSAGES,
-                                activeChatId = savedId
+                                activeChatId = effectiveChatId,
+                                storageChatTitle = effectiveChatTitle
                             )
                         }
-                        listenToMediaAndFiles(savedId)
-                        loadFolder("/", savedId)
-                        localRepository.syncFromTelegram(savedId)
+                        listenToMediaAndFiles(effectiveChatId)
+                        loadFolder(_uiState.value.currentPath, effectiveChatId)
+                        loadDeviceAlbums()
+                        localRepository.syncFromTelegram(effectiveChatId)
+                    } catch (e: Exception) {
+                        com.teledrive.app.core.AppLogger.w("ExplorerVM", "Storage chat sync failed: ${e.message}")
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-
-            // 2. Concurrently resolve / prepare Channel in background
-            launch {
-                try {
-                    val channelId = channelRepository.getOrCreateStorageChannel()
-                    if (channelId != 0L) {
-                        _uiState.update { it.copy(storageChannelId = channelId) }
-                        localRepository.syncFromTelegram(channelId)
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
                 }
             }
         }
@@ -122,6 +199,171 @@ class ExplorerViewModel : ViewModel() {
                 _uiState.update { it.copy(isScanningPeople = scanning) }
             }
         }
+
+        viewModelScope.launch {
+            var completionJob: Job? = null
+            var wasActive = false
+            var lastFinishedFiles = 0
+
+            TeleDriveApplication.instance.backupRepository.observeActiveSession().collect { session ->
+                if (session != null && (session.status == "RUNNING" || session.status == "PAUSED")) {
+                    completionJob?.cancel()
+                    completionJob = null
+                    wasActive = true
+                    lastFinishedFiles = session.totalFiles
+
+                    val totalCount = session.totalFiles
+                    val completedCount = session.completedFiles
+                    val pendingCount = (totalCount - completedCount - session.failedFiles).coerceAtLeast(0)
+                    val rawProgress = if (session.totalBytes > 0L) {
+                        (session.transferredBytes.toDouble() / session.totalBytes.toDouble()).toFloat()
+                    } else if (totalCount > 0) {
+                        (completedCount.toFloat() / totalCount.toFloat())
+                    } else 0f
+
+                    val progress = rawProgress.coerceIn(0f, 1f)
+                    val subText = if (totalCount > 1) {
+                        "${completedCount + 1} of $totalCount items"
+                    } else {
+                        if (session.totalBytes > 0L) "${(progress * 100).toInt()}%" else "1 item"
+                    }
+
+                    _uiState.update {
+                        it.copy(
+                            backupState = BackupState(
+                                isBackingUp = true,
+                                isJustCompleted = false,
+                                progress = progress,
+                                pendingCount = pendingCount,
+                                totalCount = totalCount,
+                                statusText = "Backing up…",
+                                subText = subText
+                            )
+                        )
+                    }
+                } else if (wasActive) {
+                    wasActive = false
+                    val totalCount = lastFinishedFiles
+                    _uiState.update {
+                        it.copy(
+                            backupState = BackupState(
+                                isBackingUp = false,
+                                isJustCompleted = true,
+                                progress = 1f,
+                                pendingCount = 0,
+                                totalCount = totalCount,
+                                statusText = "Backup complete",
+                                subText = if (totalCount <= 1) "All items backed up" else "$totalCount items backed up"
+                            )
+                        )
+                    }
+
+                    completionJob?.cancel()
+                    completionJob = viewModelScope.launch {
+                        delay(3500)
+                        _uiState.update { it.copy(backupState = BackupState()) }
+                    }
+                }
+            }
+        }
+
+        viewModelScope.launch {
+            val sessionTransferIds = mutableSetOf<Long>()
+            var completionJob: Job? = null
+            var wasBackingUp = false
+
+            transferManager.getAllTransfers().collect { allTransfers ->
+                // If a formal backup session is active, ignore transfer manager UI overrides
+                if (_uiState.value.backupState.isBackingUp) return@collect
+
+                val uploadTransfers = allTransfers.filter { it.type == "UPLOAD" && it.backupSessionId == null }
+                val activeUploads = uploadTransfers.filter { it.status == "PENDING" || it.status == "IN_PROGRESS" }
+
+                if (activeUploads.isNotEmpty()) {
+                    completionJob?.cancel()
+                    completionJob = null
+                    wasBackingUp = true
+
+                    for (t in activeUploads) {
+                        sessionTransferIds.add(t.transferId)
+                    }
+
+                    val sessionTransfers = uploadTransfers.filter { it.transferId in sessionTransferIds }
+                    val totalCount = sessionTransfers.size
+                    val completedCount = sessionTransfers.count { it.status == "COMPLETED" }
+                    val activeCount = activeUploads.size
+
+                    val totalBytes = sessionTransfers.sumOf { it.fileSize }
+                    val transferredBytes = sessionTransfers.sumOf {
+                        if (it.status == "COMPLETED") it.fileSize else it.transferredBytes
+                    }
+
+                    val rawProgress = if (totalBytes > 0L) {
+                        (transferredBytes.toDouble() / totalBytes.toDouble()).toFloat()
+                    } else if (totalCount > 0) {
+                        (completedCount.toFloat() / totalCount.toFloat())
+                    } else 0f
+
+                    val progress = rawProgress.coerceIn(0f, 1f)
+
+                    val subText = if (totalCount > 1) {
+                        "${completedCount + 1} of $totalCount items"
+                    } else {
+                        if (totalBytes > 0L) "${(progress * 100).toInt()}%" else "1 item"
+                    }
+
+                    _uiState.update {
+                        it.copy(
+                            backupState = BackupState(
+                                isBackingUp = true,
+                                isJustCompleted = false,
+                                progress = progress,
+                                pendingCount = activeCount,
+                                totalCount = totalCount,
+                                statusText = "Uploading…",
+                                subText = subText
+                            )
+                        )
+                    }
+                } else if (wasBackingUp && sessionTransferIds.isNotEmpty()) {
+                    val sessionTransfers = uploadTransfers.filter { it.transferId in sessionTransferIds }
+                    val totalCount = sessionTransfers.size
+                    val completedCount = sessionTransfers.count { it.status == "COMPLETED" }
+
+                    wasBackingUp = false
+
+                    if (completedCount > 0) {
+                        _uiState.update {
+                            it.copy(
+                                backupState = BackupState(
+                                    isBackingUp = false,
+                                    isJustCompleted = true,
+                                    progress = 1f,
+                                    pendingCount = 0,
+                                    totalCount = totalCount,
+                                    statusText = "Upload complete",
+                                    subText = if (totalCount == 1) "1 item" else "$totalCount items"
+                                )
+                            )
+                        }
+
+                        completionJob?.cancel()
+                        completionJob = viewModelScope.launch {
+                            delay(3500)
+                            sessionTransferIds.clear()
+                            _uiState.update {
+                                it.copy(backupState = BackupState())
+                            }
+                        }
+                    } else {
+                        sessionTransferIds.clear()
+                        _uiState.update {
+                            it.copy(backupState = BackupState())
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @OptIn(kotlinx.coroutines.FlowPreview::class)
@@ -132,20 +374,29 @@ class ExplorerViewModel : ViewModel() {
 
         mediaFlowJob = viewModelScope.launch {
             localRepository.getAllMedia(chatId)
+                .debounce(150L)
                 .flowOn(kotlinx.coroutines.Dispatchers.IO)
-                .debounce(100L)
                 .collect { mediaList ->
                     _uiState.update { it.copy(allMedia = mediaList) }
+                    try {
+                        val albums = TeleDriveApplication.instance.deviceMediaRepository.getDeviceAlbums(forceRefresh = false, cloudFiles = mediaList)
+                        _uiState.update { it.copy(deviceAlbums = albums) }
+                    } catch (_: Exception) {}
                     refreshUnifiedMedia()
-                    // Trigger face clustering on cloud media
-                    TeleDriveApplication.instance.peopleRepository.scanCloudMedia(mediaList)
+                    // Fire-and-forget on isolated BackendDispatcher:
+                    // Prevents ML face detection and inference from stealing CPU from UI or ImageLoader
+                    viewModelScope.launch(com.teledrive.app.core.AppDispatchers.Backend) {
+                        try {
+                            TeleDriveApplication.instance.peopleRepository.scanCloudMedia(mediaList)
+                        } catch (_: Exception) {}
+                    }
                 }
         }
 
         allFilesFlowJob = viewModelScope.launch {
             localRepository.getAllFiles(chatId)
+                .debounce(150L)
                 .flowOn(kotlinx.coroutines.Dispatchers.IO)
-                .debounce(100L)
                 .collect { fileList ->
                     _uiState.update { it.copy(allCloudFiles = fileList) }
                     refreshUnifiedMedia()
@@ -153,14 +404,25 @@ class ExplorerViewModel : ViewModel() {
         }
     }
 
-    fun refreshUnifiedMedia() {
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+    fun refreshUnifiedMedia(immediate: Boolean = false) {
+        // Single-flight + debounced: 10 sync batches in 2s previously built 10
+        // unified lists (each O(n) + Main regroup + full grid recompose).
+        // On initial launch (or when immediate=true), run immediately with 0ms delay.
+        unifiedRefreshJob?.cancel()
+        unifiedRefreshJob = viewModelScope.launch(com.teledrive.app.core.AppDispatchers.Backend) {
             try {
+                if (!immediate && _uiState.value.unifiedMedia.isNotEmpty()) {
+                    try { kotlinx.coroutines.delay(200) } catch (_: Exception) { return@launch }
+                }
                 val cloudMedia = _uiState.value.allMedia
                 val unified = TeleDriveApplication.instance.deviceMediaRepository.buildUnifiedMedia(cloudMedia)
-                _uiState.update { it.copy(unifiedMedia = unified) }
+                val prev = _uiState.value.unifiedMedia
+                if (prev.size != unified.size || prev != unified) {
+                    _uiState.update { it.copy(unifiedMedia = unified, isLoading = false) }
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
+                _uiState.update { it.copy(isLoading = false) }
             }
         }
     }
@@ -177,9 +439,34 @@ class ExplorerViewModel : ViewModel() {
         }
     }
 
+    fun triggerBackup() {
+        viewModelScope.launch {
+            val result = TeleDriveApplication.instance.backupRepository.startBackup(com.teledrive.app.data.db.entity.BackupTrigger.MANUAL)
+            if (result.isFailure) {
+                val err = result.exceptionOrNull()?.message ?: "Backup failed to start"
+                com.teledrive.app.core.AppLogger.w("ExplorerViewModel", "Manual backup trigger failed: $err")
+            }
+        }
+    }
+
     fun syncCurrentSource() {
         viewModelScope.launch {
-            val chatId = _uiState.value.activeChatId
+            var chatId = _uiState.value.activeChatId
+            if (chatId == 0L) {
+                chatId = preferences.getCachedStorageChatId()
+            }
+            if (chatId == 0L) {
+                chatId = _uiState.value.savedMessagesChatId
+            }
+            if (chatId == 0L) {
+                try {
+                    val id = channelRepository.getSavedMessagesChatId()
+                    if (id != 0L) {
+                        chatId = id
+                        _uiState.update { it.copy(savedMessagesChatId = id, activeChatId = id) }
+                    }
+                } catch (_: Exception) {}
+            }
             if (chatId != 0L) {
                 _uiState.update { it.copy(isRefreshing = true) }
                 localRepository.syncFromTelegram(chatId)
@@ -188,23 +475,21 @@ class ExplorerViewModel : ViewModel() {
         }
     }
 
-    fun selectStorageSource(source: StorageSource) {
+    fun selectStorageSource(source: StorageSource = StorageSource.SAVED_MESSAGES) {
         viewModelScope.launch {
-            val targetChatId = if (source == StorageSource.SAVED_MESSAGES) {
-                if (_uiState.value.savedMessagesChatId != 0L) {
-                    _uiState.value.savedMessagesChatId
-                } else {
+            val targetChatId = if (_uiState.value.savedMessagesChatId != 0L) {
+                _uiState.value.savedMessagesChatId
+            } else {
+                try {
                     val id = channelRepository.getSavedMessagesChatId()
                     _uiState.update { it.copy(savedMessagesChatId = id) }
                     id
-                }
-            } else {
-                _uiState.value.storageChannelId
+                } catch (_: Exception) { 0L }
             }
 
             _uiState.update {
                 it.copy(
-                    storageSource = source,
+                    storageSource = StorageSource.SAVED_MESSAGES,
                     activeChatId = targetChatId,
                     isLoading = true
                 )
@@ -238,7 +523,7 @@ class ExplorerViewModel : ViewModel() {
 
         // Cancel previous load job to prevent duplicate subscriptions
         loadFolderJob?.cancel()
-        loadFolderJob = viewModelScope.launch {
+        loadFolderJob = viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
             val filesFlow = localRepository.getFilesInFolder(normalizedPath, chatId)
             val foldersFlow = localRepository.getFolders(normalizedPath, chatId)
 
@@ -247,16 +532,18 @@ class ExplorerViewModel : ViewModel() {
                 Pair(files, folders)
             }.distinctUntilChanged { prev, next ->
                 prev.first == next.first && prev.second == next.second
-            }
+            }.flowOn(kotlinx.coroutines.Dispatchers.IO)
 
             combinedFlow.collect { (files, folders) ->
-                _uiState.update { state ->
-                    val filteredFiles = filterFiles(files, state.fileTypeFilter, state.searchQuery)
-                    val sortedFiles = sortFiles(filteredFiles, state.sortBy)
-                    val filteredFolders = if (state.searchQuery.isNotEmpty()) {
-                        folders.filter { it.folderName.contains(state.searchQuery, ignoreCase = true) }
-                    } else folders
+                // Filtering/sorting is O(n log n); keep it off the Main thread.
+                val snapshot = _uiState.value
+                val filteredFiles = filterFiles(files, snapshot.fileTypeFilter, snapshot.searchQuery)
+                val sortedFiles = sortFiles(filteredFiles, snapshot.sortBy)
+                val filteredFolders = if (snapshot.searchQuery.isNotEmpty()) {
+                    folders.filter { it.folderName.contains(snapshot.searchQuery, ignoreCase = true) }
+                } else folders
 
+                _uiState.update { state ->
                     state.copy(
                         files = sortedFiles,
                         folders = filteredFolders,
@@ -315,8 +602,16 @@ class ExplorerViewModel : ViewModel() {
     }
 
     fun setSearchQuery(query: String) {
-        _uiState.update { it.copy(searchQuery = query) }
-        reapplyFilters()
+        // Debounce keystrokes: the old code re-queried the whole DB on every
+        // character (getAll().first() + filter on the calling thread), dropping
+        // frames while typing in Files/Search.
+        searchDebounceJob?.cancel()
+        if (query == _uiState.value.searchQuery) return
+        searchDebounceJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(250)
+            _uiState.update { it.copy(searchQuery = query) }
+            reapplyFilters()
+        }
     }
 
     private fun reapplyFilters() {
@@ -377,10 +672,16 @@ class ExplorerViewModel : ViewModel() {
         viewModelScope.launch {
             var targetChatId = _uiState.value.activeChatId
             if (targetChatId == 0L) {
+                targetChatId = preferences.getCachedStorageChatId()
+            }
+            if (targetChatId == 0L) {
                 targetChatId = _uiState.value.savedMessagesChatId
             }
             if (targetChatId == 0L) {
                 targetChatId = channelRepository.getSavedMessagesChatId()
+            }
+            if (targetChatId == 0L) {
+                targetChatId = com.teledrive.app.core.Constants.DEFAULT_USER_CHAT_ID
             }
             if (targetChatId != 0L) {
                 for (uri in distinctUris) {
@@ -507,12 +808,17 @@ class ExplorerViewModel : ViewModel() {
         }
     }
 
-    fun loadDeviceAlbums() {
+    fun loadDeviceAlbums(forceRefresh: Boolean = false) {
         viewModelScope.launch {
             _uiState.update { it.copy(isLoadingAlbums = true) }
             try {
-                val albums = TeleDriveApplication.instance.deviceMediaRepository.getDeviceAlbums()
+                val cloudMedia = _uiState.value.allMedia
+                val albums = TeleDriveApplication.instance.deviceMediaRepository.getDeviceAlbums(
+                    forceRefresh,
+                    cloudFiles = if (cloudMedia.isNotEmpty()) cloudMedia else null
+                )
                 _uiState.update { it.copy(deviceAlbums = albums, isLoadingAlbums = false) }
+                refreshUnifiedMedia(immediate = false)
             } catch (e: Exception) {
                 _uiState.update { it.copy(isLoadingAlbums = false) }
             }
@@ -523,10 +829,16 @@ class ExplorerViewModel : ViewModel() {
         viewModelScope.launch {
             var targetChatId = _uiState.value.activeChatId
             if (targetChatId == 0L) {
+                targetChatId = preferences.getCachedStorageChatId()
+            }
+            if (targetChatId == 0L) {
                 targetChatId = _uiState.value.savedMessagesChatId
             }
             if (targetChatId == 0L) {
                 targetChatId = channelRepository.getSavedMessagesChatId()
+            }
+            if (targetChatId == 0L) {
+                targetChatId = com.teledrive.app.core.Constants.DEFAULT_USER_CHAT_ID
             }
             if (targetChatId != 0L) {
                 for (item in items) {
@@ -542,6 +854,45 @@ class ExplorerViewModel : ViewModel() {
                 TeleDriveApplication.instance.tdLibManager.logout()
             } catch (e: Exception) {}
             onLoggedOut()
+        }
+    }
+
+    fun moveToTrash(items: List<com.teledrive.app.data.repository.UnifiedMediaItem>) {
+        if (items.isEmpty()) return
+        viewModelScope.launch {
+            TeleDriveApplication.instance.trashManager.moveToTrash(items)
+            TeleDriveApplication.instance.deviceMediaRepository.invalidateCache()
+            loadDeviceAlbums(forceRefresh = true)
+            refreshUnifiedMedia()
+        }
+    }
+
+    fun restoreFromTrash(items: List<com.teledrive.app.data.repository.UnifiedMediaItem>) {
+        if (items.isEmpty()) return
+        viewModelScope.launch {
+            TeleDriveApplication.instance.trashManager.restore(items)
+            TeleDriveApplication.instance.deviceMediaRepository.invalidateCache()
+            loadDeviceAlbums(forceRefresh = true)
+            refreshUnifiedMedia()
+        }
+    }
+
+    fun permanentlyDeleteTrash(items: List<com.teledrive.app.data.repository.UnifiedMediaItem>) {
+        if (items.isEmpty()) return
+        viewModelScope.launch {
+            TeleDriveApplication.instance.trashManager.deletePermanently(items)
+            TeleDriveApplication.instance.deviceMediaRepository.invalidateCache()
+            loadDeviceAlbums(forceRefresh = true)
+            refreshUnifiedMedia()
+        }
+    }
+
+    fun emptyTrash() {
+        viewModelScope.launch {
+            TeleDriveApplication.instance.trashManager.emptyTrash()
+            TeleDriveApplication.instance.deviceMediaRepository.invalidateCache()
+            loadDeviceAlbums(forceRefresh = true)
+            refreshUnifiedMedia()
         }
     }
 }

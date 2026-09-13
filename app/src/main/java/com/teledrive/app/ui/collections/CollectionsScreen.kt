@@ -42,52 +42,58 @@ fun CollectionsScreen(
     onSmartCleanerClick: () -> Unit = {},
     onRefresh: () -> Unit = {}
 ) {
+    // Only refresh when there's actually nothing to show. The previous
+    // LaunchedEffect(Unit){ onRefresh() } fired on every tab switch (because the
+    // tab content was keyed), causing a sync + DB churn + recomposition loop.
     LaunchedEffect(Unit) {
-        onRefresh()
+        if (deviceAlbums.isEmpty() && unifiedMedia.isEmpty()) {
+            onRefresh()
+        }
     }
 
-    // Prepare preview images for categories
+    // Prepare preview images for categories. Sequence + early take(4): the old
+    // code filtered the ENTIRE unifiedMedia (5 full lowercased scans of 1000s
+    // of items on the Main thread) before taking 4. Early exit keeps this O(1).
     val albumCovers = remember(deviceAlbums) {
-        deviceAlbums.map { it.coverUri }.take(4)
+        deviceAlbums.asSequence().map { it.coverUri }.take(4).toList()
     }
 
     val onDeviceMediaUris = remember(unifiedMedia) {
-        unifiedMedia.filter { it.localUri != null }.mapNotNull { it.localUri }.take(4)
+        unifiedMedia.asSequence().filter { it.localUri != null }.mapNotNull { it.localUri }.take(4).toList()
     }
 
     val peopleMediaAvatars = remember(peopleClusters, unifiedMedia) {
         if (peopleClusters.isNotEmpty()) {
-            peopleClusters.map { it.coverFacePath }.take(4)
+            peopleClusters.asSequence().map { it.coverFacePath }.take(4).toList()
         } else {
-            val candidates = unifiedMedia.filter {
+            val candidates = unifiedMedia.asSequence().filter {
                 val name = it.displayName.lowercase()
                 val bucket = it.bucketName?.lowercase() ?: ""
                 bucket == "camera" || bucket == "restored" || name.contains("face") || name.contains("portrait") || name.contains("img_")
-            }.mapNotNull { it.localUri ?: it.cloudFile }
-            if (candidates.size >= 4) candidates.take(4)
-            else unifiedMedia.mapNotNull { it.localUri ?: it.cloudFile }.take(4)
+            }.mapNotNull { it.localUri ?: it.cloudFile }.take(4).toList()
+            if (candidates.size >= 4) candidates
+            else unifiedMedia.asSequence().mapNotNull { it.localUri ?: it.cloudFile }.take(4).toList()
         }
     }
 
     val documentMediaUris = remember(unifiedMedia) {
-        val docs = unifiedMedia.filter {
+        val docs = unifiedMedia.asSequence().filter {
             val name = it.displayName.lowercase()
             val bucket = it.bucketName?.lowercase() ?: ""
             bucket.contains("document") || name.contains("doc") || name.contains("pdf") ||
             name.contains("receipt") || name.contains("bill") || name.contains("id") ||
             name.contains("form") || name.contains("page") || name.contains("sheet")
-        }.mapNotNull { it.localUri ?: it.cloudFile }
-        if (docs.size >= 4) docs.take(4)
-        else unifiedMedia.filter { (it.bucketName?.lowercase() ?: "").contains("document") || (it.bucketName?.lowercase() ?: "").contains("new folder") }
-            .mapNotNull { it.localUri ?: it.cloudFile }.take(4)
+        }.mapNotNull { it.localUri ?: it.cloudFile }.take(4).toList()
+        if (docs.size >= 4) docs
+        else unifiedMedia.asSequence().filter { (it.bucketName?.lowercase() ?: "").contains("document") || (it.bucketName?.lowercase() ?: "").contains("new folder") }
+            .mapNotNull { it.localUri ?: it.cloudFile }.take(4).toList()
     }
 
     val stickerMediaUris = remember(unifiedMedia) {
-        val stickers = unifiedMedia.filter {
+        unifiedMedia.asSequence().filter {
             it.mimeType.contains("png") || (it.bucketName?.lowercase() ?: "").contains("sticker") ||
             (it.bucketName?.lowercase() ?: "").contains("new folder") || (it.bucketName?.lowercase() ?: "").contains("whatsapp")
-        }.mapNotNull { it.localUri ?: it.cloudFile }
-        stickers.take(4)
+        }.mapNotNull { it.localUri ?: it.cloudFile }.take(4).toList()
     }
 
     LazyVerticalGrid(
@@ -100,7 +106,7 @@ fun CollectionsScreen(
             .background(GoogleDarkBackground)
     ) {
         // Quick Action Chips Section (2x2)
-        item(span = { GridItemSpan(2) }) {
+        item(span = { GridItemSpan(2) }, contentType = "quick_actions") {
             Column {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -150,13 +156,12 @@ fun CollectionsScreen(
         }
 
         // Smart Cleaner Promo Card
-        item(span = { GridItemSpan(2) }) {
+        item(span = { GridItemSpan(2) }, contentType = "promo") {
             Card(
+                onClick = onSmartCleanerClick,
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF1B1B24)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onSmartCleanerClick)
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
                     modifier = Modifier
@@ -203,7 +208,7 @@ fun CollectionsScreen(
         }
 
         // 1. Albums Card (4-quadrant)
-        item {
+        item(contentType = "quadrant") {
             QuadrantCategoryCard(
                 title = "Albums",
                 items = albumCovers,
@@ -212,7 +217,7 @@ fun CollectionsScreen(
         }
 
         // 2. On this device Card (4-quadrant)
-        item {
+        item(contentType = "quadrant") {
             QuadrantCategoryCard(
                 title = "On this device",
                 items = onDeviceMediaUris,
@@ -221,7 +226,7 @@ fun CollectionsScreen(
         }
 
         // 3. People Card (4-circle avatars)
-        item {
+        item(contentType = "people") {
             PeopleCategoryCard(
                 title = "People",
                 items = peopleMediaAvatars,
@@ -230,7 +235,7 @@ fun CollectionsScreen(
         }
 
         // 4. Documents Card (4-quadrant)
-        item {
+        item(contentType = "quadrant") {
             QuadrantCategoryCard(
                 title = "Documents",
                 items = documentMediaUris,
@@ -239,7 +244,7 @@ fun CollectionsScreen(
         }
 
         // 5. Places Card (Map Styling)
-        item {
+        item(contentType = "places") {
             PlacesMapCategoryCard(
                 title = "Places",
                 onClick = { onCategoryClick("Places") }
@@ -247,7 +252,7 @@ fun CollectionsScreen(
         }
 
         // 6. Stickers Card (4-quadrant)
-        item {
+        item(contentType = "quadrant") {
             QuadrantCategoryCard(
                 title = "Stickers",
                 items = stickerMediaUris,
@@ -265,11 +270,10 @@ fun QuickActionChip(
     modifier: Modifier = Modifier
 ) {
     Surface(
+        onClick = onClick,
         shape = RoundedCornerShape(22.dp),
         color = Color(0xFF1E1E26),
-        modifier = modifier
-            .height(56.dp)
-            .clickable(onClick = onClick)
+        modifier = modifier.height(56.dp)
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -301,6 +305,7 @@ fun QuadrantCategoryCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(24.dp))
             .clickable(onClick = onClick)
     ) {
         Box(
@@ -348,8 +353,18 @@ private fun QuadrantCell(
         contentAlignment = Alignment.Center
     ) {
         if (item is Uri) {
+            // Quadrant cells are ~1/4 of half-screen (~100-180dp): decode small.
+            val context = androidx.compose.ui.platform.LocalContext.current
+            val req = remember(item) {
+                coil.request.ImageRequest.Builder(context)
+                    .data(item)
+                    .size(240)
+                    .crossfade(false)
+                    .allowHardware(true)
+                    .build()
+            }
             AsyncImage(
-                model = item,
+                model = req,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
@@ -373,6 +388,7 @@ fun PeopleCategoryCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(24.dp))
             .clickable(onClick = onClick)
     ) {
         Box(
@@ -420,27 +436,47 @@ private fun PeopleAvatarCell(
             .background(Color(0xFF282834)),
         contentAlignment = Alignment.Center
     ) {
+        val context = androidx.compose.ui.platform.LocalContext.current
         if (item is Uri) {
+            val req = remember(item) {
+                coil.request.ImageRequest.Builder(context)
+                    .data(item).size(200).crossfade(false).allowHardware(true).build()
+            }
             AsyncImage(
-                model = item,
+                model = req,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
         } else if (item is String) {
-            AsyncImage(
-                model = java.io.File(item),
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
+            val f = remember(item) { java.io.File(item) }
+            if (f.exists()) {
+                val req = remember(item) {
+                    coil.request.ImageRequest.Builder(context)
+                        .data(f).size(200).crossfade(false).allowHardware(true).build()
+                }
+                AsyncImage(
+                    model = req,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         } else if (item is java.io.File) {
-            AsyncImage(
-                model = item,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
+            // Avoid File.exists() on every recomposition for the same instance.
+            val exists = remember(item.absolutePath) { item.exists() && item.length() > 0 }
+            if (exists) {
+                val req = remember(item.absolutePath) {
+                    coil.request.ImageRequest.Builder(context)
+                        .data(item).size(200).crossfade(false).allowHardware(true).build()
+                }
+                AsyncImage(
+                    model = req,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         } else if (item is com.teledrive.app.data.db.entity.FileEntity) {
             TelegramThumbnail(
                 file = item,
@@ -459,6 +495,7 @@ fun PlacesMapCategoryCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .clip(RoundedCornerShape(24.dp))
             .clickable(onClick = onClick)
     ) {
         Box(

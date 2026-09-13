@@ -9,7 +9,10 @@ captures
 .externalNativeBuild
 .cxx
 *.apk
+*.idsig
 *.aab
 *.ap_
 *.dex
 /TeleDrive.apk
+target/
+app/src/main/rust/**/target/

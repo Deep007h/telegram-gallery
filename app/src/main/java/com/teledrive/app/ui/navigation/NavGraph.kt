@@ -104,6 +104,9 @@ fun NavGraph(
                     navController.navigate(Screen.Auth.route) {
                         popUpTo(0) { inclusive = true }
                     }
+                },
+                onNavigateToAuth = {
+                    navController.navigate(Screen.Auth.route)
                 }
             )
         }

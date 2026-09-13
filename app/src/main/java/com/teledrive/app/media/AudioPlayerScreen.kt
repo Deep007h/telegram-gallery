@@ -47,8 +47,7 @@ import com.teledrive.app.TeleDriveApplication
 import com.teledrive.app.core.toFormattedSize
 import com.teledrive.app.data.db.entity.FileEntity
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.takeWhile
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
 
@@ -60,58 +59,87 @@ fun AudioPlayerScreen(fileId: Long, onBack: () -> Unit) {
     val fileDao = app.database.fileDao()
     val tdLibManager = app.tdLibManager
 
-    var fileEntity by remember { mutableStateOf<FileEntity?>(null) }
-    var localPath by remember { mutableStateOf<String?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
+    var fileEntity by remember(fileId) { mutableStateOf<FileEntity?>(null) }
+    var localPath by remember(fileId) { mutableStateOf<String?>(null) }
+    var isLoading by remember(fileId) { mutableStateOf(true) }
 
-    val exoPlayer = remember {
+    // Key player on fileId so switching tracks releases the old codec instead
+    // of reusing one player across files (stale timeline + leaks).
+    val exoPlayer = remember(fileId) {
         ExoPlayer.Builder(context).build().apply {
-            playWhenReady = true
+            playWhenReady = false
+        }
+    }
+    DisposableEffect(fileId) {
+        onDispose {
+            try { exoPlayer.pause() } catch (_: Exception) {}
+            try { exoPlayer.release() } catch (_: Exception) {}
         }
     }
 
-    var isPlaying by remember { mutableStateOf(true) }
-    var currentPosition by remember { mutableLongStateOf(0L) }
-    var duration by remember { mutableLongStateOf(0L) }
+    var isPlaying by remember(fileId) { mutableStateOf(false) }
+    var currentPosition by remember(fileId) { mutableLongStateOf(0L) }
+    var duration by remember(fileId) { mutableLongStateOf(0L) }
 
     LaunchedEffect(fileId) {
-        val files = fileDao.getAllFilesList()
-        val found = files.firstOrNull { it.fileId == fileId }
+        // Single download path: the old code called downloadFile() twice AND
+        // collected fileUpdates with takeWhile (which excludes the completion
+        // event), so completion was missed and the second downloadFile stalled.
+        val found: FileEntity? = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try { fileDao.getById(fileId) } catch (_: Exception) { null }
+        }
         fileEntity = found
-
-        if (found != null) {
-            val tdFileId = found.telegramFileId
-            if (tdFileId != 0) {
-                tdLibManager.downloadFile(tdFileId, 1)
-
-                tdLibManager.fileUpdates
-                    .filter { it.fileId == tdFileId }
-                    .takeWhile { !it.isDownloadingCompleted }
-                    .collect { update ->
-                        if (update.isDownloadingCompleted && update.localPath.isNotEmpty()) {
-                            localPath = update.localPath
-                            isLoading = false
-                        }
+        if (found == null) {
+            isLoading = false
+            return@LaunchedEffect
+        }
+        val hit: String? = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            if (found.telegramFileId != 0) {
+                try {
+                    val tdFile = tdLibManager.getFile(found.telegramFileId)
+                    if (tdFile.local.isDownloadingCompleted && tdFile.local.path.isNotEmpty() && java.io.File(tdFile.local.path).exists()) {
+                        return@withContext tdFile.local.path
                     }
-
-                val finalPath = tdLibManager.downloadFile(tdFileId, 1)
-                if (finalPath.isNotEmpty() && File(finalPath).exists()) {
-                    localPath = finalPath
-                    isLoading = false
-                }
-            } else {
-                isLoading = false
+                } catch (_: Exception) {}
             }
-        } else {
+            null
+        }
+        if (hit != null) {
+            localPath = hit
+            isLoading = false
+            return@LaunchedEffect
+        }
+        if (found.telegramFileId == 0 && found.telegramMessageId == 0L) {
+            isLoading = false
+            return@LaunchedEffect
+        }
+        try {
+            val chatId = if (found.telegramChatId != 0L) found.telegramChatId else tdLibManager.getSavedMessagesChatId()
+            val path = tdLibManager.rehydrateAndDownloadFile(
+                chatId = chatId,
+                messageId = found.telegramMessageId,
+                preferredFileId = found.telegramFileId,
+                priority = 1
+            )
+            if (path.isNotEmpty() && java.io.File(path).exists()) {
+                localPath = path
+            }
+        } catch (_: Exception) {
+        } finally {
             isLoading = false
         }
     }
 
     LaunchedEffect(localPath) {
         localPath?.let { path ->
-            val mediaItem = MediaItem.fromUri(Uri.parse(path))
-            exoPlayer.setMediaItem(mediaItem)
-            exoPlayer.prepare()
+            try {
+                // Uri.fromFile (not Uri.parse): parse() drops the file scheme and
+                // ExoPlayer fails to resolve bare absolute paths.
+                val mediaItem = MediaItem.fromUri(Uri.fromFile(java.io.File(path)))
+                exoPlayer.setMediaItem(mediaItem)
+                exoPlayer.prepare()
+                exoPlayer.play()
+            } catch (_: Exception) {}
         }
     }
 
@@ -127,16 +155,15 @@ fun AudioPlayerScreen(fileId: Long, onBack: () -> Unit) {
             }
         }
         exoPlayer.addListener(listener)
-
-        while (true) {
-            currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
-            delay(500L)
-        }
-    }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            exoPlayer.release()
+        try {
+            while (true) {
+                // 500ms polling recomposes the slider/time row only (state is
+                // read below in a scoped section); listener cleanup on dispose.
+                currentPosition = try { exoPlayer.currentPosition.coerceAtLeast(0L) } catch (_: Exception) { 0L }
+                delay(500L)
+            }
+        } finally {
+            try { exoPlayer.removeListener(listener) } catch (_: Exception) {}
         }
     }
 
@@ -189,23 +216,14 @@ fun AudioPlayerScreen(fileId: Long, onBack: () -> Unit) {
 
                 Spacer(modifier = Modifier.height(48.dp))
 
-                Slider(
-                    value = if (duration > 0) (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f,
-                    onValueChange = { percent ->
-                        val newPos = (percent * duration).toLong()
+                AudioProgressBar(
+                    currentPosition = currentPosition,
+                    duration = duration,
+                    onSeek = { newPos ->
                         exoPlayer.seekTo(newPos)
                         currentPosition = newPos
-                    },
-                    modifier = Modifier.fillMaxWidth()
+                    }
                 )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Text(text = formatTime(currentPosition), style = MaterialTheme.typography.bodySmall)
-                    Text(text = formatTime(duration), style = MaterialTheme.typography.bodySmall)
-                }
 
                 Spacer(modifier = Modifier.height(32.dp))
 
@@ -245,4 +263,34 @@ private fun formatTime(ms: Long): String {
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
     return String.format(Locale.getDefault(), "%02d:%02d", minutes, seconds)
+}
+
+/**
+ * Extracted composable so that reads of [currentPosition] (updated every 500ms)
+ * only recompose this slider + time row, instead of the entire AudioPlayerScreen.
+ */
+@Composable
+private fun AudioProgressBar(
+    currentPosition: Long,
+    duration: Long,
+    onSeek: (Long) -> Unit
+) {
+    Column {
+        Slider(
+            value = if (duration > 0) (currentPosition.toFloat() / duration.toFloat()).coerceIn(0f, 1f) else 0f,
+            onValueChange = { percent ->
+                val newPos = (percent * duration).toLong()
+                onSeek(newPos)
+            },
+            modifier = Modifier.fillMaxWidth()
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(text = formatTime(currentPosition), style = MaterialTheme.typography.bodySmall)
+            Text(text = formatTime(duration), style = MaterialTheme.typography.bodySmall)
+        }
+    }
 }

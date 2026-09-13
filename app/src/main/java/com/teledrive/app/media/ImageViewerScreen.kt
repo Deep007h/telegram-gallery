@@ -34,8 +34,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import coil.compose.AsyncImage
 import com.teledrive.app.TeleDriveApplication
 import com.teledrive.app.data.db.entity.FileEntity
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -45,59 +45,60 @@ fun ImageViewerScreen(fileId: Long, onBack: () -> Unit) {
     val fileDao = app.database.fileDao()
     val tdLibManager = app.tdLibManager
 
-    var fileEntity by remember { mutableStateOf<FileEntity?>(null) }
-    var localPath by remember { mutableStateOf<String?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
+    var fileEntity by remember(fileId) { mutableStateOf<FileEntity?>(null) }
+    var localPath by remember(fileId) { mutableStateOf<String?>(null) }
+    var isLoading by remember(fileId) { mutableStateOf(true) }
     val coroutineScope = rememberCoroutineScope()
 
     LaunchedEffect(fileId) {
-        val files = fileDao.getAllFilesList()
-        val found = files.firstOrNull { it.fileId == fileId }
+        val found: FileEntity? = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try { fileDao.getById(fileId) } catch (_: Exception) { null }
+        }
         fileEntity = found
-
-        if (found != null) {
-            val tdFileId = found.telegramFileId
-            if (tdFileId != 0) {
+        if (found == null) {
+            isLoading = false
+            return@LaunchedEffect
+        }
+        val hit: String? = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            if (found.telegramFileId != 0) {
                 try {
-                    val tdFile = tdLibManager.getFile(tdFileId)
+                    val tdFile = tdLibManager.getFile(found.telegramFileId)
                     if (tdFile.local.isDownloadingCompleted && tdFile.local.path.isNotEmpty() && File(tdFile.local.path).exists()) {
-                        localPath = tdFile.local.path
-                        isLoading = false
-                        return@LaunchedEffect
+                        return@withContext tdFile.local.path
                     }
-                } catch (ignored: Exception) {}
-
-                try {
-                    tdLibManager.startDownload(tdFileId, 32)
-                } catch (ignored: Exception) {}
-
-                launch {
-                    val finalPath = tdLibManager.downloadFile(tdFileId, 32)
-                    if (finalPath.isNotEmpty() && File(finalPath).exists()) {
-                        localPath = finalPath
-                        isLoading = false
-                    }
-                }
-
-                tdLibManager.fileUpdates
-                    .filter { it.fileId == tdFileId }
-                    .collect { update ->
-                        if (update.isDownloadingCompleted && update.localPath.isNotEmpty() && File(update.localPath).exists()) {
-                            localPath = update.localPath
-                            isLoading = false
-                        }
-                    }
-            } else {
-                isLoading = false
+                } catch (_: Exception) {}
             }
-        } else {
+            null
+        }
+        if (hit != null) {
+            localPath = hit
+            isLoading = false
+            return@LaunchedEffect
+        }
+        if (found.telegramFileId == 0 && found.telegramMessageId == 0L) {
+            isLoading = false
+            return@LaunchedEffect
+        }
+        try {
+            val chatId = if (found.telegramChatId != 0L) found.telegramChatId else tdLibManager.getSavedMessagesChatId()
+            val path = tdLibManager.rehydrateAndDownloadFile(
+                chatId = chatId,
+                messageId = found.telegramMessageId,
+                preferredFileId = found.telegramFileId,
+                priority = 32
+            )
+            if (path.isNotEmpty() && File(path).exists()) {
+                localPath = path
+            }
+        } catch (_: Exception) {
+        } finally {
             isLoading = false
         }
     }
 
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offsetX by remember { mutableFloatStateOf(0f) }
-    var offsetY by remember { mutableFloatStateOf(0f) }
+    var scale by remember(fileId) { mutableFloatStateOf(1f) }
+    var offsetX by remember(fileId) { mutableFloatStateOf(0f) }
+    var offsetY by remember(fileId) { mutableFloatStateOf(0f) }
 
     Scaffold(
         topBar = {
@@ -144,12 +145,12 @@ fun ImageViewerScreen(fileId: Long, onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
                 .background(Color.Black)
-                .pointerInput(Unit) {
+                .pointerInput(fileId) {
                     detectTransformGestures { _, pan, zoom, _ ->
                         scale = (scale * zoom).coerceIn(1f, 5f)
                         if (scale > 1f) {
-                            offsetX += pan.x
-                            offsetY += pan.y
+                            offsetX = (offsetX + pan.x).coerceIn(-800f, 800f)
+                            offsetY = (offsetY + pan.y).coerceIn(-800f, 800f)
                         } else {
                             offsetX = 0f
                             offsetY = 0f
@@ -164,7 +165,7 @@ fun ImageViewerScreen(fileId: Long, onBack: () -> Unit) {
                 )
             } else if (localPath != null) {
                 AsyncImage(
-                    model = File(localPath!!),
+                    model = remember(localPath) { File(localPath!!) },
                     contentDescription = fileEntity?.fileName,
                     modifier = Modifier
                         .fillMaxSize()

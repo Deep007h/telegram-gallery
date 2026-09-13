@@ -16,7 +16,9 @@ import kotlinx.coroutines.flow.onEach
 class TransferForegroundService : Service() {
 
     private val job = SupervisorJob()
-    private val scope = CoroutineScope(Dispatchers.Main + job)
+    // DB Flows must not collect on Main: getActiveTransfers maps the whole
+    // transfer table per emission (was Dispatchers.Main → frame drops).
+    private val scope = CoroutineScope(Dispatchers.IO + job)
 
     override fun onCreate() {
         super.onCreate()
@@ -49,8 +51,12 @@ class TransferForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // The notification's Cancel action previously sent a bare CANCEL_TRANSFER
+        // with no transfer ID, so the service could never act on it (dead button).
+        // WorkManager owns cancellation now (TransferManager.cancelTransfer sets
+        // CANCELLED + cancelUniqueWork); just stop the service shell here.
         if (intent?.action == "CANCEL_TRANSFER") {
-            // Cancel specific transfer logic here, potentially extract from intent
+            stopSelf()
         }
         return START_STICKY
     }

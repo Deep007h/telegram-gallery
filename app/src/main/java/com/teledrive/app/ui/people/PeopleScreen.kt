@@ -158,7 +158,7 @@ fun PeopleScreen(
                         verticalArrangement = Arrangement.spacedBy(20.dp),
                         modifier = Modifier.fillMaxSize()
                     ) {
-                        items(peopleClusters, key = { it.personId }) { person ->
+                        items(peopleClusters, key = { it.personId }, contentType = { "person" }) { person ->
                             PersonGridItem(
                                 person = person,
                                 onClick = { onPersonClick(person) },
@@ -242,19 +242,34 @@ fun PersonGridItem(
             .fillMaxWidth()
             .clickable(onClick = onClick)
     ) {
-        // Circular Face Avatar
+        // Circular Face Avatar. No shadow(): per-cell drop shadows force an
+        // offscreen render pass per avatar and stutter the 3-col grid.
         Box(
             modifier = Modifier
                 .size(96.dp)
-                .shadow(6.dp, CircleShape)
                 .clip(CircleShape)
                 .background(Color(0xFF252533))
                 .border(2.dp, Color.White.copy(alpha = 0.15f), CircleShape),
             contentAlignment = Alignment.Center
         ) {
-            if (person.coverFacePath.isNotEmpty() && File(person.coverFacePath).exists()) {
+            val avatarExists = remember(person.coverFacePath) {
+                try {
+                    person.coverFacePath.isNotEmpty() && File(person.coverFacePath).exists() && File(person.coverFacePath).length() > 0
+                } catch (_: Exception) { false }
+            }
+            if (avatarExists) {
+                val ctx = androidx.compose.ui.platform.LocalContext.current
+                val req = remember(person.coverFacePath) {
+                    coil.request.ImageRequest.Builder(ctx)
+                        .data(File(person.coverFacePath))
+                        .size(192)
+                        .memoryCacheKey("person_${person.personId}")
+                        .crossfade(false)
+                        .allowHardware(true)
+                        .build()
+                }
                 AsyncImage(
-                    model = File(person.coverFacePath),
+                    model = req,
                     contentDescription = person.name ?: "Identified Person",
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()

@@ -28,9 +28,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -43,6 +46,7 @@ import com.teledrive.app.core.toFormattedSize
 import com.teledrive.app.data.db.entity.TransferEntity
 import com.teledrive.app.ui.components.FileIcon
 import java.io.File
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -121,19 +125,16 @@ fun TransferScreen(
                                 }
                             }
                         }
-                    items(uiState.completedTransfers, key = { "comp_${it.transferId}" }) { transfer ->
-                        val fileExists = File(transfer.localFilePath).exists()
+                    items(uiState.completedTransfers, key = { "comp_${it.transferId}" }, contentType = { "transfer" }) { transfer ->
+                        // Existence is resolved inside TransferItem off-main;
+                        // don't stat here per frame (was File.exists on composition).
                         TransferItem(
                             transfer = transfer,
                             onClick = {
-                                if (fileExists) {
-                                    FileUtils.openFile(context, transfer.localFilePath, transfer.fileName)
-                                }
+                                FileUtils.openFile(context, transfer.localFilePath, transfer.fileName)
                             },
                             onAction = {
-                                if (fileExists) {
-                                    FileUtils.openFile(context, transfer.localFilePath, transfer.fileName)
-                                }
+                                FileUtils.openFile(context, transfer.localFilePath, transfer.fileName)
                             },
                             actionIcon = {
                                 Icon(
@@ -141,8 +142,7 @@ fun TransferScreen(
                                     contentDescription = "Open file",
                                     tint = MaterialTheme.colorScheme.primary
                                 )
-                            },
-                            showAction = fileExists
+                            }
                         )
                     }
                 }
@@ -173,9 +173,14 @@ fun TransferItem(
         (transfer.transferredBytes.toFloat() / transfer.fileSize).coerceIn(0f, 1f)
     } else 0f
 
-    val fileExists = remember(transfer.localFilePath) {
-        File(transfer.localFilePath).exists()
+    // File.exists() is disk I/O: resolve off-composition and cache per path.
+    var fileExists by remember(transfer.localFilePath) { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(transfer.localFilePath) {
+        fileExists = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            try { File(transfer.localFilePath).exists() } catch (_: Exception) { false }
+        }
     }
+    val existsResolved = fileExists ?: false
 
     val modifier = if (onClick != null) {
         Modifier
@@ -198,7 +203,7 @@ fun TransferItem(
             Column {
                 if (transfer.status == "IN_PROGRESS") {
                     LinearProgressIndicator(
-                        progress = progress,
+                        progress = { progress },
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(vertical = 4.dp)
@@ -209,7 +214,7 @@ fun TransferItem(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                if (transfer.status == "COMPLETED" && !fileExists) {
+                if (transfer.status == "COMPLETED" && fileExists == false) {
                     Text(
                         text = "File not found locally",
                         style = MaterialTheme.typography.bodySmall,
@@ -226,7 +231,7 @@ fun TransferItem(
             )
         },
         trailingContent = {
-            if (showAction && onAction != null && actionIcon != null && (transfer.status != "COMPLETED" || fileExists)) {
+            if (showAction && onAction != null && actionIcon != null && (transfer.status != "COMPLETED" || existsResolved)) {
                 IconButton(onClick = onAction) {
                     actionIcon()
                 }

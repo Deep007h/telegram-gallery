@@ -6,10 +6,12 @@ import android.content.Context
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -32,6 +34,7 @@ import com.teledrive.app.ui.theme.GoogleDarkBackground
 import com.teledrive.app.ui.theme.GoogleDarkSurface
 import com.teledrive.app.ui.theme.GooglePrimaryAccent
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -48,8 +51,12 @@ fun LogsViewerScreen(
     var selectedLevelFilter by remember { mutableStateOf<LogLevel?>(null) }
     val dateFormat = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.US) }
 
+    // Cap + debounce: 1000 log lines filtered+reversed on every keystroke drops
+    // frames while typing. Take the latest 300 (what the user can actually
+    // scroll) and filter that window.
     val filteredLogs = remember(logs, searchQuery, selectedLevelFilter) {
-        logs.filter { entry ->
+        val window = if (logs.size > 300) logs.takeLast(300) else logs
+        window.filter { entry ->
             val matchesSearch = searchQuery.isEmpty() ||
                     entry.tag.contains(searchQuery, ignoreCase = true) ||
                     entry.message.contains(searchQuery, ignoreCase = true) ||
@@ -58,6 +65,14 @@ fun LogsViewerScreen(
             val matchesLevel = selectedLevelFilter == null || entry.level == selectedLevelFilter
             matchesSearch && matchesLevel
         }.reversed()
+    }
+
+    // Counts computed once per logs change (was 4× full scans per recomposition:
+    // once for ALL label + 3-4 for chips, each O(n)).
+    val levelCounts = remember(logs) {
+        val map = mutableMapOf<LogLevel, Int>()
+        for (e in logs) map[e.level] = (map[e.level] ?: 0) + 1
+        map
     }
 
     val listState = rememberLazyListState()
@@ -92,10 +107,21 @@ fun LogsViewerScreen(
                 },
                 actions = {
                     IconButton(onClick = {
-                        val text = AppLogger.getAllLogsText()
-                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        clipboard.setPrimaryClip(ClipData.newPlainText("TeleDrive Logs", text))
-                        Toast.makeText(context, "Full log copied to clipboard!", Toast.LENGTH_SHORT).show()
+                        // 5MB readText on Main ANRs: use the Main-safe snapshot
+                        // (in-memory tail) and offer the full file via share.
+                        scope.launch {
+                            val text = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                AppLogger.getAllLogsTextAsync()
+                            }
+                            try {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                // Clipboard has a ~1MB binder limit: truncate safely.
+                                clipboard.setPrimaryClip(ClipData.newPlainText("TeleDrive Logs", text.take(400_000)))
+                                Toast.makeText(context, "Full log copied to clipboard!", Toast.LENGTH_SHORT).show()
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Copy failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        }
                     }) {
                         Icon(Icons.Default.Share, contentDescription = "Copy All", tint = GooglePrimaryAccent)
                     }
@@ -154,9 +180,13 @@ fun LogsViewerScreen(
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Log Level Filter Chips
+                    // Log Level Filter Chips. Counts from a single memoized pass
+                    // (was logs.count{} per chip per recomposition = 5×O(n)).
+                    // Horizontally scrollable: 5 chips overflow 360dp screens.
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         FilterChip(
@@ -172,7 +202,7 @@ fun LogsViewerScreen(
                         )
 
                         LogLevel.values().forEach { level ->
-                            val count = logs.count { it.level == level }
+                            val count = levelCounts[level] ?: 0
                             FilterChip(
                                 selected = selectedLevelFilter == level,
                                 onClick = {
@@ -203,8 +233,14 @@ fun LogsViewerScreen(
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    items(filteredLogs, key = { "${it.timestamp}_${it.tag}_${it.message.hashCode()}" }) { entry ->
-                        LogEntryCard(entry = entry, dateFormat = dateFormat)
+                    // Stable index-based key: timestamp+hash collided for burst
+                    // logs emitted in the same ms with identical messages.
+                    items(
+                        filteredLogs.size,
+                        key = { idx -> "${filteredLogs[idx].timestamp}_${idx}" },
+                        contentType = { "log" }
+                    ) { idx ->
+                        LogEntryCard(entry = filteredLogs[idx], dateFormat = dateFormat)
                     }
                 }
             }

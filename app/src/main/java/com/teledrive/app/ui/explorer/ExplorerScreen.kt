@@ -1,6 +1,7 @@
 package com.teledrive.app.ui.explorer
 
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -91,6 +93,7 @@ fun ExplorerScreen(
     var fileToRename by remember { mutableStateOf<FileEntity?>(null) }
     var fileToDelete by remember { mutableStateOf<FileEntity?>(null) }
 
+    val context = LocalContext.current
     val gridState = rememberLazyGridState()
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
@@ -100,7 +103,7 @@ fun ExplorerScreen(
     ) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
             viewModel.uploadFiles(uris)
-            navController.navigate(Screen.Transfers.route)
+            Toast.makeText(context, "Uploading ${uris.size} file(s)...", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -174,7 +177,7 @@ fun ExplorerScreen(
                 TopAppBar(
                     title = {
                         Text(
-                            text = if (uiState.storageSource == StorageSource.SAVED_MESSAGES) "Saved Messages" else "TeleDrive Storage"
+                            text = if (uiState.storageChatTitle.isNotBlank()) uiState.storageChatTitle else "Telegram Storage"
                         )
                     },
                     actions = {
@@ -234,28 +237,6 @@ fun ExplorerScreen(
                 .padding(padding)
                 .fillMaxSize()
         ) {
-            // Storage Source Switcher (TeleDrive Channel vs Saved Messages)
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                FilterChip(
-                    selected = uiState.storageSource == StorageSource.TELEDRIVE_CHANNEL,
-                    onClick = { viewModel.selectStorageSource(StorageSource.TELEDRIVE_CHANNEL) },
-                    label = { Text("📁 TeleDrive Channel") },
-                    leadingIcon = { Icon(Icons.Default.Cloud, contentDescription = null) }
-                )
-
-                FilterChip(
-                    selected = uiState.storageSource == StorageSource.SAVED_MESSAGES,
-                    onClick = { viewModel.selectStorageSource(StorageSource.SAVED_MESSAGES) },
-                    label = { Text("💬 Saved Messages") },
-                    leadingIcon = { Icon(Icons.Default.Bookmark, contentDescription = null) }
-                )
-            }
-
             FolderBreadcrumb(
                 segments = uiState.pathSegments,
                 onSegmentClick = { viewModel.navigateToFolder(it.path) }

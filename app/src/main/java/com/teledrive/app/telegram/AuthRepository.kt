@@ -28,6 +28,25 @@ class AuthRepository(private val tdLibManager: TdLibManager) {
         }
     }
 
+    suspend fun submitBotToken(botToken: String): Result<Unit> {
+        return try {
+            tdLibManager.checkAuthenticationBotToken(botToken)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun requestQrCodeAuthentication(): Result<Unit> {
+        return try {
+            tdLibManager.requestQrCodeAuthentication()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+
     suspend fun submitRecaptchaToken(verificationId: Long, token: String): Result<Unit> {
         return try {
             tdLibManager.setApplicationVerificationToken(verificationId, token)

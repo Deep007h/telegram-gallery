@@ -15,15 +15,19 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.CloudDone
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -35,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.teledrive.app.ui.theme.GoogleDarkCard
 import com.teledrive.app.ui.theme.GoogleDarkCardElevated
 import com.teledrive.app.ui.theme.GoogleDarkSurface
@@ -83,6 +88,23 @@ fun GooglePhotosProfileSheet(
         profilePhotoPath?.let { File(it) }?.takeIf { it.exists() && it.length() > 0 }
     }
 
+    val isAllSynced = syncedCount >= totalCount && totalCount > 0
+    val formattedSize = formatBytes(totalSizeBytes)
+    val progressVal = if (totalCount > 0) (syncedCount.toFloat() / totalCount.toFloat()).coerceIn(0f, 1f) else 0f
+
+    val googleColors = remember {
+        listOf(
+            Color(0xFF4285F4), // Google Blue
+            Color(0xFFEA4335), // Google Red
+            Color(0xFFFBBC05), // Google Yellow
+            Color(0xFF34A853), // Google Green
+            Color(0xFF4285F4)  // Google Blue
+        )
+    }
+    val googleRingBrush = remember(googleColors) {
+        androidx.compose.ui.graphics.Brush.sweepGradient(googleColors)
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         containerColor = GoogleDarkSurface,
@@ -91,33 +113,149 @@ fun GooglePhotosProfileSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 8.dp)
+                .padding(horizontal = 20.dp, vertical = 4.dp)
                 .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Surface(
-                shape = CircleShape,
-                color = if (photoFile != null) Color.Transparent else GooglePrimaryAccent,
+            // Top Header: Close Button & Google Photos Title
+            Row(
                 modifier = Modifier
-                    .size(72.dp)
-                    .border(2.dp, GoogleOnDarkText.copy(alpha = 0.2f), CircleShape)
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Box(contentAlignment = Alignment.Center) {
-                    if (photoFile != null) {
-                        AsyncImage(
-                            model = photoFile,
-                            contentDescription = rawName,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .clip(CircleShape)
-                        )
-                    } else {
-                        Text(
-                            text = initialLetter,
-                            fontSize = 30.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFF003063)
+                IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Close,
+                        contentDescription = "Close",
+                        tint = GoogleOnDarkText
+                    )
+                }
+
+                Text(
+                    text = "TeleDrive Photos",
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = GoogleOnDarkText
+                )
+
+                Spacer(modifier = Modifier.size(36.dp))
+            }
+
+            val scope = rememberCoroutineScope()
+            val photoPickerLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                contract = androidx.activity.result.contract.ActivityResultContracts.GetContent()
+            ) { uri: Uri? ->
+                uri?.let {
+                    val app = com.teledrive.app.TeleDriveApplication.instance
+                    scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        try {
+                            context.filesDir.listFiles { f -> f.name.startsWith("custom_avatar") }?.forEach { it.delete() }
+                            val file = File(context.filesDir, "custom_avatar_${System.currentTimeMillis()}.jpg")
+                            context.contentResolver.openInputStream(it)?.use { input ->
+                                java.io.FileOutputStream(file).use { output -> input.copyTo(output) }
+                            }
+                            if (file.exists() && file.length() > 0) {
+                                app.preferences.setCustomProfilePhotoPath(file.absolutePath)
+                            }
+                        } catch (e: Exception) {
+                            e.printStackTrace()
+                        }
+                    }
+                }
+            }
+
+            // Google 4-Color Gradient Avatar Ring
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.size(86.dp)
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = GoogleDarkSurface,
+                    border = androidx.compose.foundation.BorderStroke(3.dp, googleRingBrush),
+                    modifier = Modifier
+                        .size(82.dp)
+                        .clickable { photoPickerLauncher.launch("image/*") }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        if (photoFile != null) {
+                            val lastMod = remember(photoFile) {
+                                try { photoFile.lastModified() } catch (_: Exception) { 0L }
+                            }
+                            val req = remember(photoFile, lastMod) {
+                                ImageRequest.Builder(context)
+                                    .data(photoFile)
+                                    .size(256)
+                                    .memoryCacheKey("profile_sheet_avatar_${photoFile.absolutePath}_$lastMod")
+                                    .diskCacheKey("profile_sheet_avatar_${photoFile.absolutePath}_$lastMod")
+                                    .crossfade(true)
+                                    .build()
+                            }
+                            AsyncImage(
+                                model = req,
+                                contentDescription = rawName,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clip(CircleShape)
+                            )
+                        } else {
+                            val resId = remember {
+                                context.resources.getIdentifier("telegram_avatar_default", "drawable", context.packageName)
+                            }
+                            if (resId != 0) {
+                                AsyncImage(
+                                    model = ImageRequest.Builder(context)
+                                        .data(resId)
+                                        .size(256)
+                                        .crossfade(true)
+                                        .build(),
+                                    contentDescription = rawName,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .clip(CircleShape)
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(GooglePrimaryAccent),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = initialLetter,
+                                        fontSize = 32.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF003063)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Camera Badge
+                Surface(
+                    shape = CircleShape,
+                    color = GoogleDarkSurface,
+                    border = androidx.compose.foundation.BorderStroke(1.5.dp, Color(0xFF2E313A)),
+                    modifier = Modifier
+                        .size(26.dp)
+                        .align(Alignment.BottomEnd)
+                        .clickable { photoPickerLauncher.launch("image/*") }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.PhotoCamera,
+                            contentDescription = "Change photo",
+                            tint = GooglePrimaryAccent,
+                            modifier = Modifier.size(14.dp)
                         )
                     }
                 }
@@ -132,7 +270,7 @@ fun GooglePhotosProfileSheet(
                 color = GoogleOnDarkText
             )
 
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.height(3.dp))
 
             Text(
                 text = phoneText,
@@ -140,7 +278,7 @@ fun GooglePhotosProfileSheet(
                 color = GoogleOnDarkTextMuted
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
             OutlinedButton(
                 onClick = {
@@ -164,15 +302,15 @@ fun GooglePhotosProfileSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // Switch account / Sign out Card
             Surface(
+                onClick = {
+                    onDismiss()
+                    onLogout()
+                },
                 shape = RoundedCornerShape(20.dp),
                 color = GoogleDarkCard,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        onDismiss()
-                        onLogout()
-                    }
+                modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
                     modifier = Modifier
@@ -222,46 +360,71 @@ fun GooglePhotosProfileSheet(
 
             Spacer(modifier = Modifier.height(14.dp))
 
+            // Google Photos Style Backup & Storage Card
             Surface(
                 shape = RoundedCornerShape(20.dp),
                 color = GoogleDarkCard,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(18.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Cloud,
-                            contentDescription = "Storage",
-                            tint = GooglePrimaryAccent,
-                            modifier = Modifier.size(22.dp)
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Text(
-                            text = "Unlimited Telegram Cloud Storage",
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = GoogleOnDarkText
-                        )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = if (isAllSynced) Icons.Default.CloudDone else Icons.Default.CloudUpload,
+                                contentDescription = "Storage",
+                                tint = if (isAllSynced) Color(0xFF34A853) else GooglePrimaryAccent,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = if (isAllSynced) "Backup complete" else if (totalCount == 0) "Telegram Cloud" else "Backing up media…",
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = GoogleOnDarkText
+                                )
+                                Text(
+                                    text = if (totalCount == 0) "Unlimited Storage" else "$syncedCount of $totalCount items synced",
+                                    fontSize = 12.sp,
+                                    color = GoogleOnDarkTextMuted
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = GooglePrimaryAccent.copy(alpha = 0.15f)
+                        ) {
+                            Text(
+                                text = "Unlimited",
+                                color = GooglePrimaryAccent,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(14.dp))
 
-                    val progressVal = if (totalCount > 0) (syncedCount.toFloat() / totalCount.toFloat()).coerceIn(0f, 1f) else 0.71f
                     LinearProgressIndicator(
-                        progress = { progressVal },
+                        progress = { if (totalCount > 0) progressVal else 0.05f },
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(6.dp)
                             .clip(RoundedCornerShape(3.dp)),
-                        color = GooglePrimaryAccent,
+                        color = if (isAllSynced) Color(0xFF34A853) else GooglePrimaryAccent,
                         trackColor = GoogleDarkCardElevated
                     )
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    val formattedSize = formatBytes(totalSizeBytes)
                     Text(
-                        text = "$syncedCount of $totalCount items backed up ($formattedSize) • Unlimited Cloud",
+                        text = if (totalCount > 0) "$formattedSize of Unlimited Telegram Cloud used" else "No photos or videos backed up yet",
                         fontSize = 12.sp,
                         color = GoogleOnDarkTextMuted
                     )
@@ -273,7 +436,7 @@ fun GooglePhotosProfileSheet(
                         horizontalArrangement = Arrangement.End
                     ) {
                         TextButton(onClick = { activeDialog = ProfileDialogType.STORAGE_INFO }) {
-                            Text("Get storage", color = GooglePrimaryAccent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Details", color = GooglePrimaryAccent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         TextButton(onClick = { activeDialog = ProfileDialogType.FREE_SPACE }) {
@@ -378,7 +541,49 @@ fun GooglePhotosProfileSheet(
                 }
             )
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Privacy Policy",
+                    fontSize = 11.sp,
+                    color = GoogleOnDarkTextSubtle,
+                    modifier = Modifier.clickable {
+                        try {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://telegram.org/privacy")))
+                        } catch (_: Exception) {}
+                    }
+                )
+                Text(
+                    text = " • ",
+                    fontSize = 11.sp,
+                    color = GoogleOnDarkTextSubtle
+                )
+                Text(
+                    text = "Terms of Service",
+                    fontSize = 11.sp,
+                    color = GoogleOnDarkTextSubtle,
+                    modifier = Modifier.clickable {
+                        try {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://telegram.org/tos")))
+                        } catch (_: Exception) {}
+                    }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = "TeleDrive v1.0 • Powered by Telegram MTProto",
+                fontSize = 11.sp,
+                color = GoogleOnDarkTextSubtle.copy(alpha = 0.7f)
+            )
+
+            Spacer(modifier = Modifier.height(28.dp))
         }
     }
 
@@ -434,11 +639,10 @@ fun ProfileOptionRow(
     onClick: () -> Unit
 ) {
     Surface(
+        onClick = onClick,
         shape = RoundedCornerShape(20.dp),
         color = GoogleDarkCard,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
+        modifier = Modifier.fillMaxWidth()
     ) {
         Row(
             modifier = Modifier

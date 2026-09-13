@@ -239,10 +239,10 @@ class OtaUpdateManager(
     }
 
     private fun isNewerVersion(remote: UpdateInfo): Boolean {
-        if (remote.versionCode > currentVersionCode && remote.versionCode > 0) {
-            return true
-        }
-        return compareSemanticVersions(remote.versionName, currentVersionName) > 0
+        val semCmp = compareSemanticVersions(remote.versionName, currentVersionName)
+        if (semCmp > 0) return true
+        if (semCmp < 0) return false
+        return false
     }
 
     private fun compareSemanticVersions(v1: String, v2: String): Int {

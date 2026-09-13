@@ -5,6 +5,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
 import androidx.compose.runtime.Immutable
+import com.teledrive.app.ai.RustFaceEngine
 import com.teledrive.app.data.repository.DeviceMediaRepository
 import com.teledrive.app.data.repository.LocalMediaItem
 import kotlinx.coroutines.Dispatchers
@@ -115,30 +116,36 @@ class SmartCleanupEngine(
      * Finds dormant media items older than N days.
      */
     fun findOldMedia(daysOld: Int = 180): Flow<List<CleanupGroup>> = flow {
-        val cutoffTimeSec = (System.currentTimeMillis() - TimeUnit.DAYS.toMillis(daysOld.toLong())) / 1000L
-        val allMedia = deviceMediaRepository.getAllDeviceMedia()
-        val oldMedia = allMedia.filter { it.dateModified > 0 && it.dateModified < cutoffTimeSec }
+        emit(findOldMediaFromList(daysOld, deviceMediaRepository.getAllDeviceMedia()))
+    }.flowOn(Dispatchers.IO)
+
+    fun findOldMedia(daysOld: Int = 180, allMedia: List<LocalMediaItem>): Flow<List<CleanupGroup>> = flow {
+        emit(findOldMediaFromList(daysOld, allMedia))
+    }.flowOn(Dispatchers.IO)
+
+    private fun findOldMediaFromList(daysOld: Int, allMedia: List<LocalMediaItem>): List<CleanupGroup> {
+        // dateModified from DeviceMediaRepository is in MILLISECONDS (DATE_MODIFIED*1000).
+        val cutoffTimeMs = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(daysOld.toLong())
+        val oldMedia = allMedia.filter { it.dateModified > 0 && it.dateModified < cutoffTimeMs }
             .sortedBy { it.dateModified }
 
-        if (oldMedia.isNotEmpty()) {
+        return if (oldMedia.isNotEmpty()) {
             val totalSize = oldMedia.sumOf { it.size }
-            emit(
-                listOf(
-                    CleanupGroup(
-                        id = "old_media_${daysOld}days",
-                        title = "Old Media (>${daysOld} days old)",
-                        description = "${oldMedia.size} dormant photos/videos taking ${formatSize(totalSize)}",
-                        category = CleanupCategory.OldMedia(daysOld),
-                        items = oldMedia,
-                        totalSizeBytes = totalSize,
-                        reclaimableSizeBytes = totalSize
-                    )
+            listOf(
+                CleanupGroup(
+                    id = "old_media_${daysOld}days",
+                    title = "Old Media (>${daysOld} days old)",
+                    description = "${oldMedia.size} dormant photos/videos taking ${formatSize(totalSize)}",
+                    category = CleanupCategory.OldMedia(daysOld),
+                    items = oldMedia,
+                    totalSizeBytes = totalSize,
+                    reclaimableSizeBytes = totalSize
                 )
             )
         } else {
-            emit(emptyList())
+            emptyList()
         }
-    }.flowOn(Dispatchers.IO)
+    }
 
     /**
      * Deletes local media items from device MediaStore.
@@ -162,9 +169,8 @@ class SmartCleanupEngine(
                 val buffer = ByteArray(32768)
                 val read = stream.read(buffer)
                 if (read > 0) {
-                    val digest = MessageDigest.getInstance("SHA-256")
-                    digest.update(buffer, 0, read)
-                    digest.digest().joinToString("") { "%02x".format(it) }
+                    val bytesToHash = if (read == buffer.size) buffer else buffer.copyOf(read)
+                    RustFaceEngine.sha256Header(bytesToHash)
                 } else null
             }
         } catch (e: Exception) {

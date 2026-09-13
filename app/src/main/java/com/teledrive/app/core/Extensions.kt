@@ -9,7 +9,8 @@ import java.util.concurrent.TimeUnit
 fun Long.toFormattedSize(): String {
     if (this <= 0) return "0 B"
     val units = arrayOf("B", "KB", "MB", "GB", "TB")
-    val digitGroups = (Math.log10(this.toDouble()) / Math.log10(1024.0)).toInt()
+    // Coerce: files > TB would otherwise index out of bounds and crash binds.
+    val digitGroups = (Math.log10(this.toDouble()) / Math.log10(1024.0)).toInt().coerceIn(0, units.size - 1)
     return String.format(Locale.getDefault(), "%.2f %s", this / Math.pow(1024.0, digitGroups.toDouble()), units[digitGroups])
 }
 

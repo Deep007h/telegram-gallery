@@ -57,7 +57,10 @@ object FileUtils {
 
     fun copyToTemp(context: Context, uri: Uri, fileName: String): String {
         val cacheDir = context.cacheDir
-        val tempFile = File(cacheDir, fileName)
+        // Unique temp name: the old File(cacheDir, fileName) overwrote concurrent
+        // uploads of same-named files (race + wrong bytes uploaded).
+        val safeName = fileName.replace(Regex("[^A-Za-z0-9._-]"), "_").takeLast(80)
+        val tempFile = File(cacheDir, "upload_${System.currentTimeMillis()}_${(0..99999).random()}_$safeName")
         context.contentResolver.openInputStream(uri)?.use { inputStream ->
             FileOutputStream(tempFile).use { outputStream ->
                 inputStream.copyTo(outputStream)
@@ -153,11 +156,14 @@ object FileUtils {
     }
 
     fun deleteTempFiles(context: Context) {
-        val cacheDir = context.cacheDir
-        cacheDir.listFiles()?.forEach { file ->
-            if (file.isFile) {
-                file.delete()
-            }
+        // Only delete our upload_* temps: the old version deleted every file in
+        // cacheDir, wiping Coil's disk cache, profile photos and OTA staging.
+        context.cacheDir.listFiles()?.forEach { file ->
+            try {
+                if (file.isFile && file.name.startsWith("upload_")) {
+                    file.delete()
+                }
+            } catch (_: Exception) {}
         }
     }
 }

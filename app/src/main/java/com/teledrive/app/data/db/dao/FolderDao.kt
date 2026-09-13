@@ -50,6 +50,12 @@ interface FolderDao {
     @Query("SELECT * FROM folders WHERE virtual_path = :virtualPath AND telegram_chat_id = :chatId LIMIT 1")
     suspend fun getByPathAndChat(virtualPath: String, chatId: Long): FolderEntity?
 
+    @Query("DELETE FROM folders")
+    suspend fun clearAll()
+
     @Query("UPDATE folders SET virtual_path = REPLACE(virtual_path, :oldPrefix, :newPrefix) WHERE virtual_path LIKE :oldPrefix || '%'")
     suspend fun updatePathPrefix(oldPrefix: String, newPrefix: String)
+
+    @Query("DELETE FROM folders WHERE telegram_chat_id != :savedMessagesChatId AND telegram_chat_id != 0")
+    suspend fun deleteNonSavedMessages(savedMessagesChatId: Long)
 }

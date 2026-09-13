@@ -6,6 +6,8 @@ import android.net.Uri
 import android.provider.MediaStore
 import com.teledrive.app.data.db.entity.FileEntity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -61,19 +63,23 @@ class DeviceMediaRepository(private val context: Context) {
     private var cachedLocalMedia: List<LocalMediaItem>? = null
     private var cachedDeviceAlbums: List<DeviceAlbum>? = null
 
+    fun invalidateCache() {
+        cachedLocalMedia = null
+        cachedDeviceAlbums = null
+    }
+
     suspend fun getAllDeviceMedia(forceRefresh: Boolean = false): List<LocalMediaItem> = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            if (!forceRefresh && cachedLocalMedia != null) {
-                return@withContext cachedLocalMedia!!
-            }
+        if (!forceRefresh) {
+            cachedLocalMedia?.let { return@withContext it }
+        }
 
-            val allMedia = mutableListOf<LocalMediaItem>()
-
-            // 1. Query Images
+        suspend fun queryImages(): List<LocalMediaItem> = withContext(Dispatchers.IO) {
+            val out = mutableListOf<LocalMediaItem>()
+            // DATA column is deprecated on Android 10+ (scoped storage) and slow;
+            // resolve path lazily and tolerate its absence.
             val imageProjection = arrayOf(
                 MediaStore.Images.Media._ID,
                 MediaStore.Images.Media.DISPLAY_NAME,
-                MediaStore.Images.Media.DATA,
                 MediaStore.Images.Media.SIZE,
                 MediaStore.Images.Media.MIME_TYPE,
                 MediaStore.Images.Media.DATE_MODIFIED,
@@ -89,51 +95,55 @@ class DeviceMediaRepository(private val context: Context) {
                     null,
                     "${MediaStore.Images.Media.DATE_MODIFIED} DESC"
                 )?.use { cursor ->
-                    val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                    val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
-                    val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
-                    val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
-                    val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.MIME_TYPE)
-                    val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED)
-                    val bucketIdCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_ID)
-                    val bucketNameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+                    val idCol = cursor.getColumnIndex(MediaStore.Images.Media._ID)
+                    val nameCol = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+                    val sizeCol = cursor.getColumnIndex(MediaStore.Images.Media.SIZE)
+                    val mimeCol = cursor.getColumnIndex(MediaStore.Images.Media.MIME_TYPE)
+                    val dateCol = cursor.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED)
+                    val bucketIdCol = cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_ID)
+                    val bucketNameCol = cursor.getColumnIndex(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+                    val dataCol = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
 
-                    while (cursor.moveToNext()) {
-                        val id = cursor.getLong(idCol)
-                        val name = cursor.getString(nameCol) ?: "IMG_$id.jpg"
-                        val path = cursor.getString(dataCol) ?: ""
-                        val size = cursor.getLong(sizeCol)
-                        val mime = cursor.getString(mimeCol) ?: "image/jpeg"
-                        val date = cursor.getLong(dateCol) * 1000L
-                        val bucketId = cursor.getString(bucketIdCol) ?: "0"
-                        val bucketName = cursor.getString(bucketNameCol) ?: "Pictures"
-                        val contentUri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+                    if (idCol != -1) {
+                        while (cursor.moveToNext()) {
+                            val id = cursor.getLong(idCol)
+                            val name = if (nameCol != -1) cursor.getString(nameCol) ?: "IMG_$id.jpg" else "IMG_$id.jpg"
+                            val path = if (dataCol != -1) cursor.getString(dataCol) ?: "" else ""
+                            val size = if (sizeCol != -1) { try { cursor.getLong(sizeCol) } catch (_: Exception) { 0L } } else 0L
+                            val mime = if (mimeCol != -1) cursor.getString(mimeCol) ?: "image/jpeg" else "image/jpeg"
+                            val date = if (dateCol != -1) cursor.getLong(dateCol) * 1000L else System.currentTimeMillis()
+                            val bucketId = if (bucketIdCol != -1) cursor.getString(bucketIdCol) ?: "0" else "0"
+                            val bucketName = if (bucketNameCol != -1) cursor.getString(bucketNameCol) ?: "Pictures" else "Pictures"
+                            val contentUri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
 
-                        allMedia.add(
-                            LocalMediaItem(
-                                id = id,
-                                contentUri = contentUri,
-                                filePath = path,
-                                displayName = name,
-                                size = size,
-                                mimeType = mime,
-                                dateModified = date,
-                                isVideo = false,
-                                bucketId = bucketId,
-                                bucketName = bucketName
+                            out.add(
+                                LocalMediaItem(
+                                    id = id,
+                                    contentUri = contentUri,
+                                    filePath = path,
+                                    displayName = name,
+                                    size = size,
+                                    mimeType = mime,
+                                    dateModified = date,
+                                    isVideo = false,
+                                    bucketId = bucketId,
+                                    bucketName = bucketName
+                                )
                             )
-                        )
+                        }
                     }
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
+                com.teledrive.app.core.AppLogger.e("DeviceMedia", "Error querying images: ${e.message}", e)
             }
+            out
+        }
 
-            // 2. Query Videos
+        suspend fun queryVideos(): List<LocalMediaItem> = withContext(Dispatchers.IO) {
+            val out = mutableListOf<LocalMediaItem>()
             val videoProjection = arrayOf(
                 MediaStore.Video.Media._ID,
                 MediaStore.Video.Media.DISPLAY_NAME,
-                MediaStore.Video.Media.DATA,
                 MediaStore.Video.Media.SIZE,
                 MediaStore.Video.Media.MIME_TYPE,
                 MediaStore.Video.Media.DATE_MODIFIED,
@@ -150,63 +160,94 @@ class DeviceMediaRepository(private val context: Context) {
                     null,
                     "${MediaStore.Video.Media.DATE_MODIFIED} DESC"
                 )?.use { cursor ->
-                    val idCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
-                    val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
-                    val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATA)
-                    val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
-                    val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.MIME_TYPE)
-                    val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_MODIFIED)
-                    val bucketIdCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.BUCKET_ID)
-                    val bucketNameCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
-                    val durCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DURATION)
+                    val idCol = cursor.getColumnIndex(MediaStore.Video.Media._ID)
+                    val nameCol = cursor.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
+                    val sizeCol = cursor.getColumnIndex(MediaStore.Video.Media.SIZE)
+                    val mimeCol = cursor.getColumnIndex(MediaStore.Video.Media.MIME_TYPE)
+                    val dateCol = cursor.getColumnIndex(MediaStore.Video.Media.DATE_MODIFIED)
+                    val bucketIdCol = cursor.getColumnIndex(MediaStore.Video.Media.BUCKET_ID)
+                    val bucketNameCol = cursor.getColumnIndex(MediaStore.Video.Media.BUCKET_DISPLAY_NAME)
+                    val durCol = cursor.getColumnIndex(MediaStore.Video.Media.DURATION)
+                    val dataCol = cursor.getColumnIndex(MediaStore.Video.Media.DATA)
 
-                    while (cursor.moveToNext()) {
-                        val id = cursor.getLong(idCol)
-                        val name = cursor.getString(nameCol) ?: "VID_$id.mp4"
-                        val path = cursor.getString(dataCol) ?: ""
-                        val size = cursor.getLong(sizeCol)
-                        val mime = cursor.getString(mimeCol) ?: "video/mp4"
-                        val date = cursor.getLong(dateCol) * 1000L
-                        val bucketId = cursor.getString(bucketIdCol) ?: "0"
-                        val bucketName = cursor.getString(bucketNameCol) ?: "Videos"
-                        val duration = cursor.getLong(durCol)
-                        val contentUri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
+                    if (idCol != -1) {
+                        while (cursor.moveToNext()) {
+                            val id = cursor.getLong(idCol)
+                            val name = if (nameCol != -1) cursor.getString(nameCol) ?: "VID_$id.mp4" else "VID_$id.mp4"
+                            val path = if (dataCol != -1) cursor.getString(dataCol) ?: "" else ""
+                            val size = if (sizeCol != -1) { try { cursor.getLong(sizeCol) } catch (_: Exception) { 0L } } else 0L
+                            val mime = if (mimeCol != -1) cursor.getString(mimeCol) ?: "video/mp4" else "video/mp4"
+                            val date = if (dateCol != -1) cursor.getLong(dateCol) * 1000L else System.currentTimeMillis()
+                            val bucketId = if (bucketIdCol != -1) cursor.getString(bucketIdCol) ?: "0" else "0"
+                            val bucketName = if (bucketNameCol != -1) cursor.getString(bucketNameCol) ?: "Videos" else "Videos"
+                            val duration = if (durCol != -1) { try { cursor.getLong(durCol) } catch (_: Exception) { 0L } } else 0L
+                            val contentUri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
 
-                        allMedia.add(
-                            LocalMediaItem(
-                                id = id,
-                                contentUri = contentUri,
-                                filePath = path,
-                                displayName = name,
-                                size = size,
-                                mimeType = mime,
-                                dateModified = date,
-                                isVideo = true,
-                                durationMs = duration,
-                                bucketId = bucketId,
-                                bucketName = bucketName
+                            out.add(
+                                LocalMediaItem(
+                                    id = id,
+                                    contentUri = contentUri,
+                                    filePath = path,
+                                    displayName = name,
+                                    size = size,
+                                    mimeType = mime,
+                                    dateModified = date,
+                                    isVideo = true,
+                                    durationMs = duration,
+                                    bucketId = bucketId,
+                                    bucketName = bucketName
+                                )
                             )
-                        )
+                        }
                     }
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
+                com.teledrive.app.core.AppLogger.e("DeviceMedia", "Error querying videos: ${e.message}", e)
             }
-
-            val sorted = allMedia.sortedByDescending { it.dateModified }
-            cachedLocalMedia = sorted
-            sorted
+            out
         }
+
+        // Query images+videos concurrently instead of serially under one mutex,
+        // then merge. The mutex only guards the cache write.
+        val (images, videos) = coroutineScope {
+            val imagesDeferred = async { queryImages() }
+            val videosDeferred = async { queryVideos() }
+            imagesDeferred.await() to videosDeferred.await()
+        }
+        val allMedia = images + videos
+        com.teledrive.app.core.AppLogger.i("DeviceMedia", "Queried ${images.size} images and ${videos.size} videos from MediaStore")
+
+        val trashedIds = try { com.teledrive.app.TeleDriveApplication.instance.trashManager.getTrashedIds() } catch (_: Exception) { emptySet() }
+        val filtered = if (trashedIds.isEmpty()) allMedia else allMedia.filterNot { trashedIds.contains("local_${it.id}") }
+
+        val sorted = filtered.sortedByDescending { it.dateModified }
+        mutex.withLock { cachedLocalMedia = sorted }
+        sorted
     }
 
-    suspend fun getDeviceAlbums(forceRefresh: Boolean = false): List<DeviceAlbum> = withContext(Dispatchers.IO) {
-        if (!forceRefresh && cachedDeviceAlbums != null) {
+    suspend fun getDeviceAlbums(forceRefresh: Boolean = false, cloudFiles: List<FileEntity>? = null): List<DeviceAlbum> = withContext(Dispatchers.IO) {
+        if (!forceRefresh && cachedDeviceAlbums != null && cloudFiles == null) {
             return@withContext cachedDeviceAlbums!!
         }
 
         val allMedia = getAllDeviceMedia(forceRefresh)
-        val grouped = allMedia.groupBy { it.bucketName }
-        val albums = grouped.map { (bucketName, items) ->
+        val filteredMedia = if (cloudFiles != null) {
+            val cloudLookup = HashMap<String, MutableList<FileEntity>>()
+            for (cloud in cloudFiles) {
+                cloudLookup.getOrPut(cloud.fileName.lowercase().trim()) { mutableListOf() }.add(cloud)
+            }
+            allMedia.filter { local ->
+                val key = local.displayName.lowercase().trim()
+                val candidates = cloudLookup[key]
+                candidates?.any { it.fileSize == local.size || it.fileSize == 0L || local.size == 0L } == true
+            }
+        } else {
+            allMedia
+        }
+
+        val grouped = filteredMedia.groupBy { it.bucketName }
+        val albums = grouped.mapNotNull { (bucketName, items) ->
+            if (items.isEmpty()) return@mapNotNull null
             val sortedItems = items.sortedByDescending { it.dateModified }
             val cover = sortedItems.first()
             val videoCount = sortedItems.count { it.isVideo }
@@ -237,18 +278,22 @@ class DeviceMediaRepository(private val context: Context) {
             }.thenByDescending { it.itemCount }
         )
 
-        cachedDeviceAlbums = albums
+        if (cloudFiles == null) {
+            cachedDeviceAlbums = albums
+        }
         albums
     }
 
     suspend fun buildUnifiedMedia(cloudFiles: List<FileEntity>): List<UnifiedMediaItem> = withContext(Dispatchers.IO) {
+        val trashedIds = try { com.teledrive.app.TeleDriveApplication.instance.trashManager.getTrashedIds() } catch (_: Exception) { emptySet() }
+        val activeCloudFiles = if (trashedIds.isEmpty()) cloudFiles else cloudFiles.filterNot { trashedIds.contains("cloud_${it.fileId}") }
         val localMedia = getAllDeviceMedia(forceRefresh = false)
-        val unified = ArrayList<UnifiedMediaItem>(localMedia.size + cloudFiles.size)
-        val matchedCloudFileIds = HashSet<Long>(cloudFiles.size)
+        val unified = ArrayList<UnifiedMediaItem>(activeCloudFiles.size)
+        val matchedCloudFileIds = HashSet<Long>(activeCloudFiles.size)
 
         // Build fast lookup index for cloud files
         val cloudByName = HashMap<String, MutableList<FileEntity>>()
-        for (cloud in cloudFiles) {
+        for (cloud in activeCloudFiles) {
             val key = cloud.fileName.lowercase().trim()
             cloudByName.getOrPut(key) { mutableListOf() }.add(cloud)
         }
@@ -256,9 +301,14 @@ class DeviceMediaRepository(private val context: Context) {
         for (local in localMedia) {
             val key = local.displayName.lowercase().trim()
             val candidateClouds = cloudByName[key]
+            // Exact size match only: the old <4096 tolerance merged distinct
+            // files that share a name (burst IMG_001.jpg) and showed a wrong
+            // "backed up" badge + wrong cloud thumbnail.
             val matchingCloud = candidateClouds?.firstOrNull { cloud ->
-                cloud.fileSize == local.size || Math.abs(cloud.fileSize - local.size) < 4096
-            } ?: candidateClouds?.firstOrNull()
+                cloud.fileSize == local.size
+            } ?: candidateClouds?.firstOrNull { cloud ->
+                cloud.fileSize == 0L || local.size == 0L
+            }
 
             if (matchingCloud != null) {
                 matchedCloudFileIds.add(matchingCloud.fileId)
@@ -279,29 +329,13 @@ class DeviceMediaRepository(private val context: Context) {
                         bucketName = local.bucketName
                     )
                 )
-            } else {
-                unified.add(
-                    UnifiedMediaItem(
-                        id = "local_${local.id}",
-                        displayName = local.displayName,
-                        dateModified = local.dateModified,
-                        isVideo = local.isVideo,
-                        durationMs = local.durationMs,
-                        mimeType = local.mimeType,
-                        fileSize = local.size,
-                        localUri = local.contentUri,
-                        localPath = local.filePath,
-                        cloudFile = null,
-                        isCloudBackedUp = false,
-                        isLocalOnDevice = true,
-                        bucketName = local.bucketName
-                    )
-                )
             }
+            // Non-backed up local media items are omitted:
+            // "only show files / phots / video present in saved messages chat of telegram , nothing else"
         }
 
         // Add remaining cloud files that are not stored locally on device
-        for (cloud in cloudFiles) {
+        for (cloud in activeCloudFiles) {
             if (!matchedCloudFileIds.contains(cloud.fileId)) {
                 val isVid = cloud.mimeType.startsWith("video/") || cloud.fileName.endsWith(".mp4", true) || cloud.fileName.endsWith(".mkv", true)
                 unified.add(
