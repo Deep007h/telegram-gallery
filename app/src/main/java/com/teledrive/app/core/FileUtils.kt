@@ -166,4 +166,12 @@ object FileUtils {
             } catch (_: Exception) {}
         }
     }
+
+    fun formatFileSize(bytes: Long): String {
+        if (bytes <= 0) return "0 B"
+        val units = arrayOf("B", "KB", "MB", "GB", "TB")
+        val digitGroups = (Math.log10(bytes.toDouble()) / Math.log10(1024.0)).toInt().coerceIn(0, units.size - 1)
+        val value = bytes / Math.pow(1024.0, digitGroups.toDouble())
+        return String.format(java.util.Locale.US, "%.1f %s", value, units[digitGroups])
+    }
 }

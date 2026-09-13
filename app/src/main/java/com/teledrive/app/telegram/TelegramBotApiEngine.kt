@@ -59,6 +59,55 @@ object TelegramBotApiEngine {
      */
     val messageToFileIdMap = java.util.concurrent.ConcurrentHashMap<Long, String>()
 
+    fun persistBotFileId(context: android.content.Context, messageId: Long, fileId: String) {
+        if (messageId != 0L && fileId.isNotBlank()) {
+            messageToFileIdMap[messageId] = fileId
+            try {
+                val sp = context.getSharedPreferences("teledrive_bot_files", android.content.Context.MODE_PRIVATE)
+                sp.edit().putString(messageId.toString(), fileId).apply()
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun getPersistedBotFileId(context: android.content.Context, messageId: Long): String? {
+        if (messageId == 0L) return null
+        val memory = messageToFileIdMap[messageId]
+        if (!memory.isNullOrBlank()) return memory
+        return try {
+            val sp = context.getSharedPreferences("teledrive_bot_files", android.content.Context.MODE_PRIVATE)
+            val saved = sp.getString(messageId.toString(), null)
+            if (!saved.isNullOrBlank()) {
+                messageToFileIdMap[messageId] = saved
+            }
+            saved
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    suspend fun getStreamUrl(botToken: String, fileId: String): String? = withContext(Dispatchers.IO) {
+        val token = botToken.ifBlank { Constants.DEFAULT_BOT_TOKEN }
+        if (token.isBlank() || fileId.isBlank()) return@withContext null
+        try {
+            val getFileUrl = URL("$API_BASE/bot$token/getFile?file_id=" + URLEncoder.encode(fileId, "UTF-8"))
+            val getFileConn = (getFileUrl.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10_000
+                readTimeout = 10_000
+            }
+            if (getFileConn.responseCode == HttpURLConnection.HTTP_OK) {
+                val getFileJson = JSONObject(getFileConn.inputStream.bufferedReader().use { it.readText() })
+                if (getFileJson.optBoolean("ok", false)) {
+                    val filePath = getFileJson.getJSONObject("result").getString("file_path")
+                    return@withContext "$API_BASE/file/bot$token/$filePath"
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     /**
      * Upload a file to Telegram using Bot API sendDocument with streaming progress.
      */
@@ -186,6 +235,7 @@ object TelegramBotApiEngine {
 
                     if (fileId.isNotBlank() && msgId != 0L) {
                         messageToFileIdMap[msgId] = fileId
+                        persistBotFileId(com.teledrive.app.TeleDriveApplication.instance, msgId, fileId)
                     }
                     onProgress(totalFileSize, totalFileSize)
                     Result.success(
@@ -221,7 +271,7 @@ object TelegramBotApiEngine {
         botToken: String,
         fileId: String,
         destFile: File,
-        onProgress: (bytesDownloaded: Long, totalBytes: Long) -> Unit = { _, _ -> }
+        onProgress: suspend (bytesDownloaded: Long, totalBytes: Long) -> Unit = { _, _ -> }
     ): Result<File> = withContext(Dispatchers.IO) {
         val token = botToken.ifBlank { Constants.DEFAULT_BOT_TOKEN }
         AppLogger.i(TAG, "Resolving file download for fileId=$fileId")

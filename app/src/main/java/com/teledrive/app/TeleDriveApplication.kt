@@ -113,6 +113,11 @@ class TeleDriveApplication : Application(), ImageLoaderFactory {
         preferences = AppPreferences(this)
 
         tdLibManager = TdLibManager()
+        val cachedApiId = preferences.getCachedApiId()
+        val cachedApiHash = preferences.getCachedApiHash()
+        if (cachedApiId > 0 && cachedApiHash.isNotBlank()) {
+            tdLibManager.setApiCredentials(cachedApiId, cachedApiHash)
+        }
         val cachedSavedId = preferences.getCachedSavedMessagesChatId()
         if (cachedSavedId != 0L) {
             tdLibManager.cachedSavedMessagesChatId = cachedSavedId

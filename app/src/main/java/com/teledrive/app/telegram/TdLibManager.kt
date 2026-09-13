@@ -74,6 +74,14 @@ class TdLibManager {
     private var activeApiId: Int = Constants.DEFAULT_API_ID
     private var activeApiHash: String = Constants.DEFAULT_API_HASH
 
+    /** Sets the API credentials to use before or during TDLib initialization */
+    fun setApiCredentials(apiId: Int, apiHash: String) {
+        if (apiId > 0 && apiHash.isNotBlank()) {
+            activeApiId = apiId
+            activeApiHash = apiHash
+        }
+    }
+
     /** Public read of the keys the live client was started with (for change checks). */
     fun getActiveApiId(): Int = activeApiId
     fun getActiveApiHash(): String = activeApiHash
@@ -1048,10 +1056,16 @@ class TdLibManager {
         return sendRequest(TdApi.DownloadFile(fileId, priority, 0, 0, false)) as TdApi.File
     }
 
-    suspend fun downloadFile(fileId: Int, priority: Int = 1): String {
+    suspend fun downloadFile(
+        fileId: Int,
+        priority: Int = 1,
+        timeoutMs: Long = 180_000L,
+        onProgress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)? = null
+    ): String {
         try {
             val file = getFile(fileId)
             if (file.local.isDownloadingCompleted && file.local.path.isNotEmpty() && File(file.local.path).exists()) {
+                onProgress?.invoke(file.size, file.size)
                 return file.local.path
             }
         } catch (ignored: Exception) {}
@@ -1059,7 +1073,19 @@ class TdLibManager {
         // Subscribe to completion events BEFORE initiating the download
         // to avoid missing fast completions (race condition fix).
         return try {
-            withTimeout(15_000) {
+            withTimeout(timeoutMs) {
+                var progressJob: kotlinx.coroutines.Job? = null
+                if (onProgress != null) {
+                    progressJob = launch {
+                        fileUpdates.collect { update ->
+                            if (update.fileId == fileId) {
+                                val total = if (update.expectedSize > 0) update.expectedSize else update.size
+                                onProgress(update.downloadedSize, total)
+                            }
+                        }
+                    }
+                }
+
                 val completionDeferred = async {
                     fileUpdates.first { it.fileId == fileId && it.isDownloadingCompleted && it.localPath.isNotEmpty() }.localPath
                 }
@@ -1068,7 +1094,9 @@ class TdLibManager {
                 try {
                     val res = sendRequest(TdApi.DownloadFile(fileId, priority, 0, 0, false))
                     if (res is TdApi.File && res.local.isDownloadingCompleted && res.local.path.isNotEmpty() && File(res.local.path).exists()) {
+                        progressJob?.cancel()
                         completionDeferred.cancel()
+                        onProgress?.invoke(res.size, res.size)
                         return@withTimeout res.local.path
                     }
                 } catch (e: Exception) {
@@ -1076,7 +1104,15 @@ class TdLibManager {
                 }
 
                 // Wait for the flow to deliver the completion event
-                completionDeferred.await()
+                val path = completionDeferred.await()
+                progressJob?.cancel()
+                onProgress?.let {
+                    try {
+                        val finalFile = getFile(fileId)
+                        it(finalFile.size, finalFile.size)
+                    } catch (_: Exception) {}
+                }
+                path
             }
         } catch (e: Exception) {
             try {
@@ -1322,18 +1358,20 @@ class TdLibManager {
         chatId: Long,
         messageId: Long,
         preferredFileId: Int,
-        priority: Int = 32
+        priority: Int = 32,
+        onProgress: ((downloadedBytes: Long, totalBytes: Long) -> Unit)? = null
     ): String {
         if (preferredFileId != 0) {
             try {
                 val tdFile = getFile(preferredFileId)
                 if (tdFile.local.isDownloadingCompleted && tdFile.local.path.isNotEmpty() && File(tdFile.local.path).exists()) {
+                    onProgress?.invoke(tdFile.size, tdFile.size)
                     return tdFile.local.path
                 }
             } catch (ignored: Exception) {}
 
             try {
-                val path = downloadFile(preferredFileId, priority)
+                val path = downloadFile(preferredFileId, priority, onProgress = onProgress)
                 if (path.isNotEmpty() && File(path).exists()) {
                     return path
                 }
@@ -1345,7 +1383,7 @@ class TdLibManager {
             val info = getMessageInfo(chatId, messageId)
             if (info != null && info.documentFileId != 0) {
                 try {
-                    val freshPath = downloadFile(info.documentFileId, priority)
+                    val freshPath = downloadFile(info.documentFileId, priority, onProgress = onProgress)
                     if (freshPath.isNotEmpty() && File(freshPath).exists()) {
                         return freshPath
                     }

@@ -2,9 +2,8 @@ package com.teledrive.app.media
 
 import android.net.Uri
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
+import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Download
@@ -37,6 +36,9 @@ import com.teledrive.app.TeleDriveApplication
 import com.teledrive.app.data.db.entity.FileEntity
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.teledrive.app.core.Constants
+import com.teledrive.app.core.FileUtils
+import com.teledrive.app.telegram.TelegramBotApiEngine
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -49,13 +51,16 @@ fun VideoPlayerScreen(fileId: Long, onBack: () -> Unit) {
 
     var fileEntity by remember(fileId) { mutableStateOf<FileEntity?>(null) }
     var localPath by remember(fileId) { mutableStateOf<String?>(null) }
+    var streamUri by remember(fileId) { mutableStateOf<Uri?>(null) }
     val coroutineScope = rememberCoroutineScope()
     var isLoading by remember(fileId) { mutableStateOf(true) }
+    var downloadProgress by remember(fileId) { mutableStateOf(0f) }
+    var statusText by remember(fileId) { mutableStateOf("Streaming video...") }
 
     // Key on fileId so navigating between videos releases the old codec.
     val exoPlayer = remember(fileId) {
         ExoPlayer.Builder(context).build().apply {
-            playWhenReady = false
+            playWhenReady = true
         }
     }
     DisposableEffect(fileId) {
@@ -76,6 +81,12 @@ fun VideoPlayerScreen(fileId: Long, onBack: () -> Unit) {
             return@LaunchedEffect
         }
         val hit: String? = withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val cached = File(context.cacheDir, found.fileName)
+            if (cached.exists() && cached.length() > 0) return@withContext cached.absolutePath
+            try {
+                val downloaded = File(FileUtils.getDownloadDir(context), found.fileName)
+                if (downloaded.exists() && downloaded.length() > 0) return@withContext downloaded.absolutePath
+            } catch (_: Exception) {}
             if (found.telegramFileId != 0) {
                 try {
                     val tdFile = tdLibManager.getFile(found.telegramFileId)
@@ -91,6 +102,18 @@ fun VideoPlayerScreen(fileId: Long, onBack: () -> Unit) {
             isLoading = false
             return@LaunchedEffect
         }
+
+        // Check if Bot API stream URL is available for instant progressive playback
+        val botToken = app.preferences.getBotTokenSync() ?: Constants.DEFAULT_BOT_TOKEN
+        val botFileId = TelegramBotApiEngine.getPersistedBotFileId(context, found.telegramMessageId)
+        if (botFileId != null && botToken.isNotBlank()) {
+            val liveUrl = TelegramBotApiEngine.getStreamUrl(botToken, botFileId)
+            if (liveUrl != null) {
+                streamUri = Uri.parse(liveUrl)
+                isLoading = false
+            }
+        }
+
         if (found.telegramFileId == 0 && found.telegramMessageId == 0L) {
             isLoading = false
             return@LaunchedEffect
@@ -101,21 +124,62 @@ fun VideoPlayerScreen(fileId: Long, onBack: () -> Unit) {
                 chatId = chatId,
                 messageId = found.telegramMessageId,
                 preferredFileId = found.telegramFileId,
-                priority = 32
+                priority = 32,
+                onProgress = { downloaded, total ->
+                    if (total > 0) {
+                        val progress = (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+                        downloadProgress = progress
+                        statusText = "Streaming ${(progress * 100).toInt()}% • ${FileUtils.formatFileSize(downloaded)} / ${FileUtils.formatFileSize(total)}"
+                    } else {
+                        statusText = "Streaming ${FileUtils.formatFileSize(downloaded)}..."
+                    }
+                }
             )
             if (path.isNotEmpty() && File(path).exists()) {
                 localPath = path
+                isLoading = false
+                return@LaunchedEffect
             }
         } catch (_: Exception) {
-        } finally {
-            isLoading = false
         }
+
+        // Fallback to Bot API download if available
+        if (streamUri == null && botFileId != null && botToken.isNotBlank()) {
+            try {
+                statusText = "Buffering via Telegram Bot API..."
+                val dest = File(context.cacheDir, found.fileName)
+                val botResult = TelegramBotApiEngine.downloadFile(
+                    botToken = botToken,
+                    fileId = botFileId,
+                    destFile = dest,
+                    onProgress = { downloaded, total ->
+                        if (total > 0) {
+                            val progress = (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+                            downloadProgress = progress
+                            statusText = "Buffering ${(progress * 100).toInt()}% • ${FileUtils.formatFileSize(downloaded)} / ${FileUtils.formatFileSize(total)}"
+                        }
+                    }
+                )
+                if (botResult.isSuccess && dest.exists()) {
+                    localPath = dest.absolutePath
+                    isLoading = false
+                    return@LaunchedEffect
+                }
+            } catch (_: Exception) {}
+        }
+
+        isLoading = false
     }
 
-    LaunchedEffect(localPath) {
-        localPath?.let { path ->
+    LaunchedEffect(localPath, streamUri) {
+        val targetUri = when {
+            localPath != null -> Uri.fromFile(File(localPath!!))
+            streamUri != null -> streamUri
+            else -> null
+        }
+        targetUri?.let { uri ->
             try {
-                val mediaItem = MediaItem.fromUri(Uri.fromFile(File(path)))
+                val mediaItem = MediaItem.fromUri(uri)
                 exoPlayer.setMediaItem(mediaItem)
                 exoPlayer.prepare()
                 exoPlayer.play()
@@ -169,12 +233,16 @@ fun VideoPlayerScreen(fileId: Long, onBack: () -> Unit) {
                 .padding(padding)
                 .background(Color.Black)
         ) {
-            if (isLoading) {
-                CircularProgressIndicator(
+            if (isLoading && localPath == null && streamUri == null) {
+                Column(
                     modifier = Modifier.align(Alignment.Center),
-                    color = Color.White
-                )
-            } else if (localPath != null) {
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    CircularProgressIndicator(color = Color(0xFF38BDF8))
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(text = statusText, color = Color.White)
+                }
+            } else if (localPath != null || streamUri != null) {
                 AndroidView(
                     factory = {
                         PlayerView(context).apply {

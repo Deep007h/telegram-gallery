@@ -181,7 +181,7 @@ class LocalRepository(
                     break
                 }
                 if (batch.totalRawCount == 0 || batch.lastRawMessageId == 0L) {
-                    if (fromMessageId == 0L && retryCount < 4) {
+                    if (retryCount < 4) {
                         retryCount++
                         com.teledrive.app.core.AppLogger.logSync("Retry", "Waiting for TDLib history warmup for chatId=$targetChatId (attempt $retryCount/4)")
                         kotlinx.coroutines.delay(1000L * retryCount)
@@ -192,6 +192,7 @@ class LocalRepository(
                     }
                     break
                 }
+                retryCount = 0
 
                 com.teledrive.app.core.AppLogger.logSync(
                     "Batch",
@@ -281,15 +282,17 @@ class LocalRepository(
 
             // Prune files ONLY if the entire chat history was successfully traversed
             // and we have verified active message IDs, preventing accidental data wipes
-            if (completedCleanly && activeTelegramMessageIds.isNotEmpty()) {
+            if (completedCleanly && activeTelegramMessageIds.isNotEmpty() && totalSyncedItems > 0) {
                 val localFiles = fileDao.getAllFilesList().filter { it.telegramChatId == targetChatId && it.telegramMessageId != 0L }
                 val toDelete = localFiles.filter { !activeTelegramMessageIds.contains(it.telegramMessageId) }
-                if (toDelete.isNotEmpty()) {
+                if (toDelete.isNotEmpty() && toDelete.size < localFiles.size * 0.3) {
                     toDelete.forEach { localFile ->
                         fileDao.delete(localFile)
                         com.teledrive.app.TeleDriveApplication.instance.thumbnailCacheManager.removeThumbnail(localFile)
                     }
                     com.teledrive.app.core.AppLogger.logSync("PruneDeleted", "Pruned ${toDelete.size} deleted messages from Room for chatId=$targetChatId")
+                } else if (toDelete.isNotEmpty()) {
+                    com.teledrive.app.core.AppLogger.w("SyncEngine", "Skipped broad file prune safety check (${toDelete.size} out of ${localFiles.size})")
                 }
             }
 
@@ -316,11 +319,7 @@ class LocalRepository(
     }
 
     fun getAllFiles(chatId: Long): Flow<List<FileEntity>> {
-        val targetChatId = when {
-            chatId != 0L -> chatId
-            preferences.getCachedStorageChatId() != 0L -> preferences.getCachedStorageChatId()
-            else -> tdLibManager.cachedSavedMessagesChatId
-        }
+        val targetChatId = if (chatId != 0L) chatId else 0L
         return fileDao.getAll().map { list ->
             list.filter { file ->
                 if (targetChatId != 0L) {
@@ -334,11 +333,7 @@ class LocalRepository(
     }
 
     fun getAllMedia(chatId: Long): Flow<List<FileEntity>> {
-        val targetChatId = when {
-            chatId != 0L -> chatId
-            preferences.getCachedStorageChatId() != 0L -> preferences.getCachedStorageChatId()
-            else -> tdLibManager.cachedSavedMessagesChatId
-        }
+        val targetChatId = if (chatId != 0L) chatId else 0L
         return fileDao.getAll().map { list ->
             list.filter { file ->
                 (if (targetChatId != 0L) (file.telegramChatId == targetChatId || file.telegramChatId == com.teledrive.app.core.Constants.DEFAULT_USER_CHAT_ID) else true) &&

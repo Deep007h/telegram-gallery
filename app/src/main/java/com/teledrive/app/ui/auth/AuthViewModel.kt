@@ -27,6 +27,7 @@ data class AuthUiState(
     val botTokenInput: String = "",
     val botChatIdInput: String = "",
     val showApiSetup: Boolean = false,
+    val hasConfiguredApiKeys: Boolean = false,
     val apiIdInput: String = "",
     val apiHashInput: String = "",
     val phoneNumber: String = "",
@@ -51,21 +52,35 @@ class AuthViewModel : ViewModel() {
 
     init {
         viewModelScope.launch {
-            val savedId = preferences.apiId.first()
-            val savedHash = preferences.apiHash.first()
-            if (savedId > 0 && savedHash.isNotBlank()) {
-                _uiState.update { it.copy(apiIdInput = savedId.toString(), apiHashInput = savedHash) }
-                // Don't blindly restart (which deletes the entire tdlib database
-                // dir and forces a full resync). Restart only if the saved keys
-                // differ from the active client keys.
+            val isCustomConfigured = preferences.isCustomApiConfigured()
+            val savedId = preferences.getCachedApiId()
+            val savedHash = preferences.getCachedApiHash()
+
+            if (isCustomConfigured && savedId > 0 && savedHash.isNotBlank()) {
+                _uiState.update {
+                    it.copy(
+                        hasConfiguredApiKeys = true,
+                        apiIdInput = savedId.toString(),
+                        apiHashInput = savedHash
+                    )
+                }
                 try {
                     if (app.tdLibManager.getActiveApiId() != savedId ||
                         app.tdLibManager.getActiveApiHash() != savedHash
                     ) {
+                        app.tdLibManager.setApiCredentials(savedId, savedHash)
                         authRepository.restartClient(savedId, savedHash)
                     }
                 } catch (_: Exception) {
                     // Best-effort only; authState flow will surface real errors.
+                }
+            } else {
+                _uiState.update {
+                    it.copy(
+                        hasConfiguredApiKeys = false,
+                        apiIdInput = if (savedId > 0 && savedId != com.teledrive.app.core.Constants.API_ID) savedId.toString() else "",
+                        apiHashInput = if (savedHash.isNotBlank() && savedHash != com.teledrive.app.core.Constants.API_HASH) savedHash else ""
+                    )
                 }
             }
 
@@ -364,6 +379,53 @@ class AuthViewModel : ViewModel() {
 
     fun toggleApiSetup() {
         _uiState.update { it.copy(showApiSetup = !it.showApiSetup) }
+    }
+
+    fun editApiConfiguration() {
+        _uiState.update { it.copy(hasConfiguredApiKeys = false, errorMessage = null) }
+    }
+
+    fun saveApiConfiguration(idStr: String, hashStr: String) {
+        val id = idStr.trim().toIntOrNull()
+        val hash = hashStr.trim()
+        if (id == null || id <= 0) {
+            _uiState.update { it.copy(errorMessage = "Please enter a valid numeric Telegram API ID") }
+            return
+        }
+        if (hash.length < 16) {
+            _uiState.update { it.copy(errorMessage = "Please enter a valid Telegram API Hash (from my.telegram.org)") }
+            return
+        }
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, errorMessage = null) }
+            try {
+                preferences.setApiId(id)
+                preferences.setApiHash(hash)
+                preferences.setCustomApiConfigured(true)
+                app.tdLibManager.setApiCredentials(id, hash)
+                authRepository.restartClient(id, hash)
+                _uiState.update {
+                    it.copy(
+                        hasConfiguredApiKeys = true,
+                        apiIdInput = id.toString(),
+                        apiHashInput = hash,
+                        isLoading = false,
+                        successMessage = "API credentials configured successfully!"
+                    )
+                }
+                if (_uiState.value.selectedMode == AuthMode.QR) {
+                    startQrLogin()
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        errorMessage = "Failed to initialize TDLib with credentials: ${e.message}"
+                    )
+                }
+            }
+        }
     }
 
     fun updateApiId(id: String) {

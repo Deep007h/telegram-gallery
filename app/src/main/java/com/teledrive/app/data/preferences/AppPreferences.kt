@@ -38,6 +38,7 @@ class AppPreferences(private val context: Context) {
         private val STORAGE_CHAT_ID = longPreferencesKey("selected_storage_chat_id")
         private val STORAGE_CHAT_TITLE = stringPreferencesKey("selected_storage_chat_title")
         private val LINKED_CHATS_JSON = stringPreferencesKey("linked_storage_chats_json")
+        private val CUSTOM_API_CONFIGURED = booleanPreferencesKey("custom_api_configured")
     }
 
     fun getCachedTelegramProfilePhotoPath(): String {
@@ -128,6 +129,8 @@ class AppPreferences(private val context: Context) {
         val sp = context.getSharedPreferences("teledrive_fast_prefs", Context.MODE_PRIVATE)
         return sp.getString("fast_bot_token", "") ?: ""
     }
+
+    fun getBotTokenSync(): String = getCachedBotToken()
 
     fun setCachedBotToken(token: String) {
         val sp = context.getSharedPreferences("teledrive_fast_prefs", Context.MODE_PRIVATE)
@@ -330,23 +333,71 @@ class AppPreferences(private val context: Context) {
         }
     }
 
+    fun getCachedApiId(): Int {
+        val sp = context.getSharedPreferences("teledrive_fast_prefs", Context.MODE_PRIVATE)
+        return sp.getInt("fast_api_id", 0)
+    }
+
+    fun setCachedApiId(id: Int) {
+        val sp = context.getSharedPreferences("teledrive_fast_prefs", Context.MODE_PRIVATE)
+        sp.edit().putInt("fast_api_id", id).apply()
+    }
+
     val apiId: Flow<Int> = context.dataStore.data.map { prefs ->
-        prefs[API_ID] ?: Constants.API_ID
+        val cached = getCachedApiId()
+        if (cached > 0) cached else (prefs[API_ID] ?: Constants.API_ID)
     }
 
     suspend fun setApiId(id: Int) {
+        setCachedApiId(id)
         context.dataStore.edit { prefs ->
             prefs[API_ID] = id
         }
     }
 
+    fun getCachedApiHash(): String {
+        val sp = context.getSharedPreferences("teledrive_fast_prefs", Context.MODE_PRIVATE)
+        return sp.getString("fast_api_hash", "") ?: ""
+    }
+
+    fun setCachedApiHash(hash: String) {
+        val sp = context.getSharedPreferences("teledrive_fast_prefs", Context.MODE_PRIVATE)
+        sp.edit().putString("fast_api_hash", hash).apply()
+    }
+
     val apiHash: Flow<String> = context.dataStore.data.map { prefs ->
-        prefs[API_HASH] ?: Constants.API_HASH
+        val cached = getCachedApiHash()
+        if (cached.isNotBlank()) cached else (prefs[API_HASH] ?: Constants.API_HASH)
     }
 
     suspend fun setApiHash(hash: String) {
+        setCachedApiHash(hash)
         context.dataStore.edit { prefs ->
             prefs[API_HASH] = hash
+        }
+    }
+
+    fun isCustomApiConfigured(): Boolean {
+        val sp = context.getSharedPreferences("teledrive_fast_prefs", Context.MODE_PRIVATE)
+        val configured = sp.getBoolean("fast_custom_api_configured", false)
+        val id = getCachedApiId()
+        val hash = getCachedApiHash()
+        return configured || (id > 0 && hash.isNotBlank() && id != Constants.API_ID)
+    }
+
+    fun setCachedCustomApiConfigured(configured: Boolean) {
+        val sp = context.getSharedPreferences("teledrive_fast_prefs", Context.MODE_PRIVATE)
+        sp.edit().putBoolean("fast_custom_api_configured", configured).apply()
+    }
+
+    val customApiConfigured: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[CUSTOM_API_CONFIGURED] ?: isCustomApiConfigured()
+    }
+
+    suspend fun setCustomApiConfigured(configured: Boolean) {
+        setCachedCustomApiConfigured(configured)
+        context.dataStore.edit { prefs ->
+            prefs[CUSTOM_API_CONFIGURED] = configured
         }
     }
 

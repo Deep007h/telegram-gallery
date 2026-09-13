@@ -105,34 +105,76 @@ fun AuthScreen(
                     .padding(horizontal = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Spacer(modifier = Modifier.height(48.dp))
+                Spacer(modifier = Modifier.height(36.dp))
 
                 // Hero Section
                 HeroSection()
 
-                Spacer(modifier = Modifier.height(32.dp))
+                Spacer(modifier = Modifier.height(24.dp))
 
-                // Main Content — Phone or Bot based on mode
-                AnimatedContent(
-                    targetState = uiState.selectedMode,
-                    transitionSpec = {
-                        fadeIn() + slideInHorizontally { if (targetState == AuthMode.PHONE) -it else it } togetherWith
-                        fadeOut() + slideOutHorizontally { if (targetState == AuthMode.PHONE) it else -it }
-                    },
-                    label = "mode_switch"
-                ) { mode ->
-                    when (mode) {
-                        AuthMode.QR -> QrLoginSection(uiState, viewModel)
-                        AuthMode.PHONE -> PhoneLoginSection(uiState, viewModel, onAuthSuccess)
-                        AuthMode.WEB -> WebVerificationCard(uiState, viewModel, onAuthSuccess)
-                        AuthMode.BOT_TOKEN -> BotTokenSection(uiState, viewModel)
+                if (!uiState.hasConfiguredApiKeys && uiState.selectedMode != AuthMode.BOT_TOKEN) {
+                    ApiConfigurationSection(uiState, viewModel)
+                } else {
+                    if (uiState.hasConfiguredApiKeys) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = CardDarkElevated,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 16.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        Icons.Default.Key,
+                                        contentDescription = null,
+                                        tint = SuccessGreen,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        "API Active (ID: ${uiState.apiIdInput.ifBlank { "Configured" }})",
+                                        fontSize = 12.sp,
+                                        color = TextPrimary
+                                    )
+                                }
+                                Text(
+                                    "Change",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = AccentBlue,
+                                    modifier = Modifier.clickable { viewModel.editApiConfiguration() }
+                                )
+                            }
+                        }
                     }
+
+                    // Main Content — Phone, QR, Web, or Bot based on mode
+                    AnimatedContent(
+                        targetState = uiState.selectedMode,
+                        transitionSpec = {
+                            fadeIn() + slideInHorizontally { if (targetState == AuthMode.PHONE) -it else it } togetherWith
+                            fadeOut() + slideOutHorizontally { if (targetState == AuthMode.PHONE) it else -it }
+                        },
+                        label = "mode_switch"
+                    ) { mode ->
+                        when (mode) {
+                            AuthMode.QR -> QrLoginSection(uiState, viewModel)
+                            AuthMode.PHONE -> PhoneLoginSection(uiState, viewModel, onAuthSuccess)
+                            AuthMode.WEB -> WebVerificationCard(uiState, viewModel, onAuthSuccess)
+                            AuthMode.BOT_TOKEN -> BotTokenSection(uiState, viewModel)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Mode Switcher
+                    ModeSwitcher(uiState, viewModel)
                 }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Mode Switcher
-                ModeSwitcher(uiState, viewModel)
 
                 Spacer(modifier = Modifier.height(12.dp))
 
@@ -921,6 +963,188 @@ private fun PhoneInputCard(uiState: AuthUiState, viewModel: AuthViewModel) {
                         fontSize = 12.sp,
                         color = TextMuted
                     )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ApiConfigurationSection(uiState: AuthUiState, viewModel: AuthViewModel) {
+    val context = LocalContext.current
+    var idInput by remember(uiState.apiIdInput) { mutableStateOf(uiState.apiIdInput) }
+    var hashInput by remember(uiState.apiHashInput) { mutableStateOf(uiState.apiHashInput) }
+
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = CardDark),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    shape = CircleShape,
+                    color = Color(0xFFFFB74D).copy(alpha = 0.15f),
+                    modifier = Modifier.size(42.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Default.Key,
+                            contentDescription = null,
+                            tint = Color(0xFFFFB74D),
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Column {
+                    Text(
+                        "Telegram API Setup",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        "Required for instant QR & cloud sync",
+                        fontSize = 12.sp,
+                        color = SuccessGreen
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Step by step guide box
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(CardDarkElevated, RoundedCornerShape(12.dp))
+                    .padding(14.dp)
+            ) {
+                Text(
+                    "Why are API Keys required?",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = AccentBlue
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Telegram requires each app to use its own API ID and Hash. This unlocks unlimited cloud storage, prevents flood limits, and avoids carrier SMS blocking.",
+                    fontSize = 12.sp,
+                    color = TextSecondary,
+                    lineHeight = 16.sp
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    "Quick setup (takes ~1 minute):",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = TextPrimary
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "1. Tap 'Open my.telegram.org' below\n2. Log in with your Telegram account\n3. Click 'API development tools'\n4. Fill app title & short name, then submit\n5. Copy 'App api_id' & 'App api_hash' below",
+                    fontSize = 11.sp,
+                    color = TextMuted,
+                    lineHeight = 16.sp
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Button(
+                onClick = {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://my.telegram.org/apps"))
+                    context.startActivity(intent)
+                },
+                modifier = Modifier.fillMaxWidth().height(42.dp),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = BrandBlueDark,
+                    contentColor = AccentBlue
+                )
+            ) {
+                Icon(Icons.Default.OpenInBrowser, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Open my.telegram.org", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            OutlinedTextField(
+                value = idInput,
+                onValueChange = { 
+                    idInput = it
+                    viewModel.updateApiId(it)
+                },
+                label = { Text("App API ID (Numbers only)", color = TextMuted, fontSize = 12.sp) },
+                placeholder = { Text("e.g. 2938475", color = TextMuted.copy(alpha = 0.5f), fontSize = 12.sp) },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                shape = RoundedCornerShape(10.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    focusedBorderColor = AccentBlue,
+                    unfocusedBorderColor = DividerColor,
+                    focusedContainerColor = CardDarkElevated,
+                    unfocusedContainerColor = CardDarkElevated
+                )
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            OutlinedTextField(
+                value = hashInput,
+                onValueChange = { 
+                    hashInput = it
+                    viewModel.updateApiHash(it)
+                },
+                label = { Text("App API Hash (32-character string)", color = TextMuted, fontSize = 12.sp) },
+                placeholder = { Text("e.g. 0123456789abcdef0123456789abcdef", color = TextMuted.copy(alpha = 0.5f), fontSize = 12.sp) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                shape = RoundedCornerShape(10.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                    focusedBorderColor = AccentBlue,
+                    unfocusedBorderColor = DividerColor,
+                    focusedContainerColor = CardDarkElevated,
+                    unfocusedContainerColor = CardDarkElevated
+                )
+            )
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Button(
+                onClick = {
+                    viewModel.saveApiConfiguration(idInput, hashInput)
+                },
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(12.dp),
+                enabled = idInput.trim().toIntOrNull() != null && hashInput.trim().length >= 16 && !uiState.isLoading,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = AccentBlue,
+                    contentColor = Color(0xFF003063)
+                )
+            ) {
+                Text(
+                    "Save & Continue to Login",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center
+            ) {
+                TextButton(onClick = { viewModel.setAuthMode(AuthMode.BOT_TOKEN) }) {
+                    Text("Or sign in with a Telegram Bot Token", color = TextMuted, fontSize = 12.sp)
                 }
             }
         }

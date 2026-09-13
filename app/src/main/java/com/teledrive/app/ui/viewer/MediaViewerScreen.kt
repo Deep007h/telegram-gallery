@@ -63,9 +63,11 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.request.SuccessResult
 import com.teledrive.app.TeleDriveApplication
+import com.teledrive.app.core.Constants
 import com.teledrive.app.core.FileUtils
 import com.teledrive.app.data.db.entity.FileEntity
 import com.teledrive.app.data.repository.UnifiedMediaItem
+import com.teledrive.app.telegram.TelegramBotApiEngine
 import com.teledrive.app.ui.theme.GoogleOnDarkTextMuted
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -1036,11 +1038,15 @@ private fun SingleCloudImageViewerPage(
     var localPath by remember(file.fileId) { mutableStateOf<String?>(null) }
     var isLoading by remember(file.fileId) { mutableStateOf(true) }
     var errorMessage by remember(file.fileId) { mutableStateOf<String?>(null) }
+    var downloadProgress by remember(file.fileId) { mutableFloatStateOf(0f) }
+    var statusText by remember(file.fileId) { mutableStateOf("Loading high-res...") }
 
     LaunchedEffect(file.fileId, file.telegramFileId, file.telegramMessageId) {
         isLoading = true
         errorMessage = null
         localPath = null
+        downloadProgress = 0f
+        statusText = "Loading high-res..."
 
         val hitPath: String? = withContext(kotlinx.coroutines.Dispatchers.IO) {
             val cached = File(context.cacheDir, file.fileName)
@@ -1072,22 +1078,56 @@ private fun SingleCloudImageViewerPage(
                 chatId = chatId,
                 messageId = file.telegramMessageId,
                 preferredFileId = file.telegramFileId,
-                priority = 32
+                priority = 32,
+                onProgress = { downloaded, total ->
+                    if (total > 0) {
+                        val progress = (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+                        downloadProgress = progress
+                        statusText = "Downloading ${(progress * 100).toInt()}%"
+                    }
+                }
             )
             if (path.isNotEmpty() && File(path).exists()) {
                 localPath = path
-            } else {
-                errorMessage = "Failed to download image"
+                isLoading = false
+                return@LaunchedEffect
             }
-        } catch (e: Exception) {
-            errorMessage = e.message ?: "Unable to load photo"
-        } finally {
-            isLoading = false
-        }
+        } catch (_: Exception) {}
+
+        // Fallback: Telegram Bot API direct download if available
+        try {
+            val botToken = app.preferences.getBotTokenSync() ?: Constants.DEFAULT_BOT_TOKEN
+            val botFileId = TelegramBotApiEngine.getPersistedBotFileId(context, file.telegramMessageId)
+            if (botFileId != null && botToken.isNotBlank()) {
+                statusText = "Downloading via Bot API..."
+                val dest = File(context.cacheDir, file.fileName)
+                val botResult = TelegramBotApiEngine.downloadFile(
+                    botToken = botToken,
+                    fileId = botFileId,
+                    destFile = dest,
+                    onProgress = { downloaded, total ->
+                        if (total > 0) {
+                            val progress = (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+                            downloadProgress = progress
+                            statusText = "Downloading ${(progress * 100).toInt()}%"
+                        }
+                    }
+                )
+                if (botResult.isSuccess && dest.exists()) {
+                    localPath = dest.absolutePath
+                    isLoading = false
+                    return@LaunchedEffect
+                }
+            }
+        } catch (_: Exception) {}
+
+        errorMessage = "Failed to download image"
+        isLoading = false
     }
 
     val cachedThumb = remember(file.fileId, file.telegramFileId) {
         app.thumbnailCacheManager.getFastCachedPath(file)
+            ?: com.teledrive.app.core.FastThumbnailCacheManager.getCachedThumbnailPath("cloud_${file.fileId}")
     }
 
     if (localPath != null) {
@@ -1123,7 +1163,7 @@ private fun SingleCloudImageViewerPage(
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Loading high-res...", color = Color.White, fontSize = 12.sp)
+                        Text(statusText, color = Color.White, fontSize = 12.sp)
                     }
                 }
             } else {
@@ -1145,6 +1185,7 @@ private fun SingleCloudImageViewerPage(
 
 /**
  * Cloud Video Player that rehydrates / downloads via TDLib and delegates to GalleryVideoPlayer.
+ * Supports direct Bot API progressive streaming and real-time TDLib download progress.
  */
 @Composable
 private fun SingleCloudVideoPlayerPage(
@@ -1157,8 +1198,11 @@ private fun SingleCloudVideoPlayerPage(
     val app = TeleDriveApplication.instance
     val tdLibManager = app.tdLibManager
     var localPath by remember(file.fileId) { mutableStateOf<String?>(null) }
+    var streamUri by remember(file.fileId) { mutableStateOf<Uri?>(null) }
     var isLoading by remember(file.fileId) { mutableStateOf(true) }
     var errorMessage by remember(file.fileId) { mutableStateOf<String?>(null) }
+    var downloadProgress by remember(file.fileId) { mutableFloatStateOf(0f) }
+    var statusText by remember(file.fileId) { mutableStateOf("Streaming from Telegram Cloud...") }
 
     val cachedThumb = remember(file.fileId) {
         app.thumbnailCacheManager.getFastCachedPath(file)
@@ -1169,7 +1213,10 @@ private fun SingleCloudVideoPlayerPage(
         isLoading = true
         errorMessage = null
         localPath = null
+        streamUri = null
+        downloadProgress = 0f
 
+        // 1. Check local cached or downloaded file
         val hitPath: String? = withContext(kotlinx.coroutines.Dispatchers.IO) {
             val cached = File(context.cacheDir, file.fileName)
             if (cached.exists() && cached.length() > 0) return@withContext cached.absolutePath
@@ -1194,27 +1241,83 @@ private fun SingleCloudVideoPlayerPage(
             return@LaunchedEffect
         }
 
+        // 2. Try fast progressive streaming via Bot API stream URL if available
+        val botToken = app.preferences.getBotTokenSync() ?: Constants.DEFAULT_BOT_TOKEN
+        val botFileId = TelegramBotApiEngine.getPersistedBotFileId(context, file.telegramMessageId)
+        if (botFileId != null && botToken.isNotBlank()) {
+            val liveStreamUrl = TelegramBotApiEngine.getStreamUrl(botToken, botFileId)
+            if (liveStreamUrl != null) {
+                streamUri = Uri.parse(liveStreamUrl)
+                isLoading = false
+            }
+        }
+
+        // 3. Download/buffer via TDLib with real-time progress
         try {
             val chatId = if (file.telegramChatId != 0L) file.telegramChatId else tdLibManager.getSavedMessagesChatId()
             val path = tdLibManager.rehydrateAndDownloadFile(
                 chatId = chatId,
                 messageId = file.telegramMessageId,
                 preferredFileId = file.telegramFileId,
-                priority = 32
+                priority = 32,
+                onProgress = { downloaded, total ->
+                    if (total > 0) {
+                        val progress = (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+                        downloadProgress = progress
+                        statusText = "Streaming ${(progress * 100).toInt()}% • ${FileUtils.formatFileSize(downloaded)} / ${FileUtils.formatFileSize(total)}"
+                    } else {
+                        statusText = "Streaming ${FileUtils.formatFileSize(downloaded)}..."
+                    }
+                }
             )
             if (path.isNotEmpty() && File(path).exists()) {
                 localPath = path
-            } else {
-                errorMessage = "Failed to download video"
+                isLoading = false
+                return@LaunchedEffect
             }
-        } catch (e: Exception) {
-            errorMessage = e.message ?: "Unable to load video"
-        } finally {
-            isLoading = false
+        } catch (_: Exception) {}
+
+        // 4. If TDLib failed and no streamUri yet, fallback to Bot API download
+        if (streamUri == null && botFileId != null && botToken.isNotBlank()) {
+            try {
+                statusText = "Buffering via Telegram Bot API..."
+                val dest = File(context.cacheDir, file.fileName)
+                val botResult = TelegramBotApiEngine.downloadFile(
+                    botToken = botToken,
+                    fileId = botFileId,
+                    destFile = dest,
+                    onProgress = { downloaded, total ->
+                        if (total > 0) {
+                            val progress = (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f)
+                            downloadProgress = progress
+                            statusText = "Buffering ${(progress * 100).toInt()}% • ${FileUtils.formatFileSize(downloaded)} / ${FileUtils.formatFileSize(total)}"
+                        }
+                    }
+                )
+                if (botResult.isSuccess && dest.exists()) {
+                    localPath = dest.absolutePath
+                    isLoading = false
+                    return@LaunchedEffect
+                }
+            } catch (_: Exception) {}
         }
+
+        if (streamUri == null && localPath == null) {
+            errorMessage = "Unable to stream or download video"
+        }
+        isLoading = false
     }
 
-    if (isLoading && localPath == null) {
+    if (localPath != null || streamUri != null) {
+        GalleryVideoPlayer(
+            uri = streamUri,
+            filePath = localPath,
+            thumbnailModel = if (cachedThumb != null) File(cachedThumb) else null,
+            durationMs = durationMs,
+            isCurrentPage = isCurrentPage,
+            onTap = onTap
+        )
+    } else if (isLoading) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             if (cachedThumb != null) {
                 AsyncImage(
@@ -1230,27 +1333,41 @@ private fun SingleCloudVideoPlayerPage(
             }
             Surface(
                 shape = CircleShape,
-                color = Color.Black.copy(alpha = 0.55f),
-                modifier = Modifier.size(64.dp)
+                color = Color.Black.copy(alpha = 0.65f),
+                modifier = Modifier.size(72.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = "Play",
-                        tint = Color.White,
-                        modifier = Modifier.size(36.dp)
-                    )
+                    if (downloadProgress > 0f) {
+                        CircularProgressIndicator(
+                            progress = { downloadProgress },
+                            color = Color(0xFF38BDF8),
+                            strokeWidth = 3.dp,
+                            modifier = Modifier.size(56.dp)
+                        )
+                        Text(
+                            text = "${(downloadProgress * 100).toInt()}%",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    } else {
+                        CircularProgressIndicator(
+                            color = Color(0xFF38BDF8),
+                            strokeWidth = 3.dp,
+                            modifier = Modifier.size(40.dp)
+                        )
+                    }
                 }
             }
             Surface(
-                color = Color.Black.copy(alpha = 0.65f),
+                color = Color.Black.copy(alpha = 0.75f),
                 shape = RoundedCornerShape(20.dp),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 90.dp)
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     CircularProgressIndicator(
@@ -1258,20 +1375,11 @@ private fun SingleCloudVideoPlayerPage(
                         strokeWidth = 2.dp,
                         modifier = Modifier.size(16.dp)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Streaming from Telegram Cloud...", color = Color.White, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(statusText, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                 }
             }
         }
-    } else if (localPath != null) {
-        GalleryVideoPlayer(
-            uri = null,
-            filePath = localPath,
-            thumbnailModel = if (cachedThumb != null) File(cachedThumb) else null,
-            durationMs = durationMs,
-            isCurrentPage = isCurrentPage,
-            onTap = onTap
-        )
     } else {
         Column(
             modifier = Modifier.fillMaxSize(),
